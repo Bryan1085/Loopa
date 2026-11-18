@@ -36,9 +36,17 @@ import {
 } from '../core/mesh/slideTools';
 import { encodeProjectThumbnailFromCanvas } from '../core/project/thumbnail';
 import {
+  DEFAULT_MATERIAL_COLOR,
+  DEFAULT_MATERIAL_METALLIC,
+  DEFAULT_MATERIAL_ROUGHNESS,
+  resolveObjectMaterial,
+} from '../core/project/hierarchy';
+import {
   AxisConstraint,
   CameraProjection,
+  MaterialAsset,
   ModelerSettings,
+  ObjectShadingMode,
   ObjectTransform,
   SceneObjectData,
   TouchModifierState,
@@ -175,6 +183,7 @@ interface ObjectVisual {
   objectType: SceneObjectData['objectType'];
   group: THREE.Group;
   solidMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
+  clayMaterial: THREE.MeshStandardMaterial;
   faceOrientationFrontMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial> | null;
   faceOrientationBackMesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial> | null;
   wireEdges: THREE.LineSegments<THREE.BufferGeometry, THREE.LineBasicMaterial>;
@@ -189,6 +198,8 @@ interface ObjectVisual {
   baseEditableMesh: EditableMesh;
   editableMesh: EditableMesh;
   lastMeshData: SerializedEditableMesh | null;
+  shading: ObjectShadingMode;
+  materialId: string | null;
   modifiers: ModifierSlot[];
   modifiersSignature: string;
   hasActiveModifiers: boolean;
@@ -317,6 +328,8 @@ export class ViewportEngine {
   private selectedObjectId: string | null = null;
   private selectedObjectIds = new Set<string>();
   private currentObjectsData = new Map<string, SceneObjectData>();
+  private sharedMaterials = new Map<string, THREE.MeshStandardMaterial>();
+  private materialAssetMap = new Map<string, MaterialAsset>();
   private workMode: WorkMode = 'object';
   private editSelectionMode: EditSelectionMode = 'vertex';
   private selectedComponentIds = new Set<string>();
@@ -3293,6 +3306,7 @@ export class ViewportEngine {
 
   public syncScene(params: {
     objects: SceneObjectData[];
+    materials?: MaterialAsset[];
     selectedObjectId: string | null;
     selectedObjectIds?: Set<string>;
     workMode: WorkMode;
@@ -3349,6 +3363,7 @@ export class ViewportEngine {
     if (params.selectedObjectId) nextSelObjs.add(params.selectedObjectId);
     this.selectedObjectIds = nextSelObjs;
     this.currentObjectsData = new Map(params.objects.map((o) => [o.id, o]));
+    this.syncSharedMaterials(params.materials ?? []);
     this.sceneTransformRefs = buildTransformRefsFromObjects(params.objects);
 
     this.workMode = params.workMode;
@@ -3367,10 +3382,7 @@ export class ViewportEngine {
       prevProp.falloff !== nextProp.falloff ||
       prevProp.connectedOnly !== nextProp.connectedOnly;
     this.proportionalSettings = nextProp;
-    this.displayMode =
-      params.settings.displayMode === 'material'
-        ? 'solid'
-        : (params.settings.displayMode ?? 'solid');
+    this.displayMode = params.settings.displayMode ?? 'solid';
     this.xrayTransparency = Math.max(
       10,
       Math.min(90, params.settings.xrayTransparency ?? 50),
@@ -3453,13 +3465,17 @@ export class ViewportEngine {
           )
         ) {
           const modSig = this.buildModifiersSignature(objData, this.sceneTransformRefs);
+          const nextShading: ObjectShadingMode =
+            objData.shading === 'smooth' ? 'smooth' : 'flat';
           if (
             visual.lastMeshData !== objData.mesh ||
             visual.group.userData.meshRevision !== params.meshRevision ||
-            visual.modifiersSignature !== modSig
+            visual.modifiersSignature !== modSig ||
+            visual.shading !== nextShading
           ) {
             visual.modifiers = objData.modifiers ?? [];
             visual.modifiersSignature = modSig;
+            visual.shading = nextShading;
             visual.baseEditableMesh = EditableMesh.fromJSON(objData.mesh);
             visual.lastMeshData = objData.mesh;
 
@@ -3488,9 +3504,10 @@ export class ViewportEngine {
           }
         }
 
+        visual.materialId = objData.materialId ?? null;
         const inEditOnThis =
           objData.id === params.selectedObjectId && params.workMode === 'edit';
-        this.applyObjectDisplayMode(visual, isSelected, inEditOnThis);
+        this.applyObjectDisplayMode(visual, isSelected, inEditOnThis, objData);
       }
     }
 
@@ -3502,6 +3519,7 @@ export class ViewportEngine {
         this.visuals.delete(id);
       }
     }
+    this.pruneUnusedSharedMaterials();
 
     if (
       propChanged &&
@@ -3536,9 +3554,78 @@ export class ViewportEngine {
     this.requestRender();
   }
 
+  private syncSharedMaterials(materials: MaterialAsset[]): void {
+    this.materialAssetMap.clear();
+    for (const mat of materials) {
+      this.materialAssetMap.set(mat.id, mat);
+      let threeMat = this.sharedMaterials.get(mat.id);
+      if (!threeMat) {
+        threeMat = new THREE.MeshStandardMaterial({
+          color: mat.baseColor,
+          metalness: mat.metallic,
+          roughness: mat.roughness,
+          side: THREE.DoubleSide,
+          polygonOffset: true,
+          polygonOffsetFactor: 1,
+          polygonOffsetUnits: 1,
+        });
+        this.sharedMaterials.set(mat.id, threeMat);
+      } else {
+        threeMat.color.set(mat.baseColor);
+        threeMat.metalness = mat.metallic;
+        threeMat.roughness = mat.roughness;
+        const opacity = mat.opacity ?? 1;
+        const isTransparent = opacity < 0.999;
+        if (threeMat.transparent !== isTransparent) {
+          threeMat.transparent = isTransparent;
+          threeMat.needsUpdate = true;
+        }
+        threeMat.opacity = opacity;
+        threeMat.depthWrite = !isTransparent;
+        if (mat.emissiveColor && mat.emissiveIntensity) {
+          threeMat.emissive.set(mat.emissiveColor);
+          threeMat.emissiveIntensity = mat.emissiveIntensity;
+        } else {
+          threeMat.emissive.setHex(0x000000);
+          threeMat.emissiveIntensity = 1;
+        }
+      }
+    }
+  }
+
+  private pruneUnusedSharedMaterials(): void {
+    for (const [id, mat] of this.sharedMaterials.entries()) {
+      if (!this.materialAssetMap.has(id)) {
+        mat.dispose();
+        this.sharedMaterials.delete(id);
+      }
+    }
+  }
+
+  private getOrCreateMaterialForObject(
+    objData: SceneObjectData,
+    fallback: THREE.MeshStandardMaterial,
+  ): THREE.MeshStandardMaterial {
+    const matList = Array.from(this.materialAssetMap.values());
+    const resolved = resolveObjectMaterial(objData, matList);
+    const pooled = this.sharedMaterials.get(resolved.id);
+    if (pooled) return pooled;
+    fallback.color.set(resolved.baseColor || DEFAULT_MATERIAL_COLOR);
+    fallback.metalness = resolved.metallic ?? DEFAULT_MATERIAL_METALLIC;
+    fallback.roughness = resolved.roughness ?? DEFAULT_MATERIAL_ROUGHNESS;
+    if (fallback.transparent) {
+      fallback.transparent = false;
+      fallback.needsUpdate = true;
+    }
+    fallback.opacity = 1;
+    fallback.depthWrite = true;
+    fallback.emissive.setHex(0x000000);
+    return fallback;
+  }
+
   private disposeObjectVisual(visual: ObjectVisual): void {
     visual.solidMesh.geometry.dispose();
-    visual.solidMesh.material.dispose();
+    visual.clayMaterial.dispose();
     visual.faceOrientationFrontMesh?.material.dispose();
     visual.faceOrientationBackMesh?.material.dispose();
     visual.wireEdges.geometry.dispose();
@@ -3652,9 +3739,10 @@ export class ViewportEngine {
       wireEdges.userData.objectId = objData.id;
 
       // Unused placeholder solidMesh so ObjectVisual contract stays uniform
+      const dummyClayMat = new THREE.MeshStandardMaterial();
       const dummySolid = new THREE.Mesh(
         new THREE.BufferGeometry(),
-        new THREE.MeshStandardMaterial(),
+        dummyClayMat,
       );
       dummySolid.visible = false;
 
@@ -3670,6 +3758,7 @@ export class ViewportEngine {
         objectType: 'reference_image',
         group,
         solidMesh: dummySolid,
+        clayMaterial: dummyClayMat,
         faceOrientationFrontMesh: null,
         faceOrientationBackMesh: null,
         wireEdges,
@@ -3684,6 +3773,8 @@ export class ViewportEngine {
         baseEditableMesh: new EditableMesh(),
         editableMesh: new EditableMesh(),
         lastMeshData: null,
+        shading: 'flat',
+        materialId: null,
         modifiers: [],
         modifiersSignature: '',
         hasActiveModifiers: false,
@@ -3791,6 +3882,7 @@ export class ViewportEngine {
       objectType: objData.objectType,
       group,
       solidMesh,
+      clayMaterial: solidMat,
       faceOrientationFrontMesh,
       faceOrientationBackMesh,
       wireEdges,
@@ -3805,6 +3897,8 @@ export class ViewportEngine {
       baseEditableMesh: baseMesh,
       editableMesh: evalMesh,
       lastMeshData: objData.mesh,
+      shading: objData.shading === 'smooth' ? 'smooth' : 'flat',
+      materialId: objData.materialId ?? null,
       modifiers,
       modifiersSignature: this.buildModifiersSignature(
         objData,
@@ -3831,9 +3925,11 @@ export class ViewportEngine {
     visual: ObjectVisual,
     isSelected: boolean,
     inEditOnThis: boolean,
+    objData?: SceneObjectData,
   ): void {
     const isWireframe = this.displayMode === 'wireframe';
     const isXray = this.displayMode === 'xray';
+    const isMaterial = this.displayMode === 'material';
     const xrayOpacity = Math.max(
       0.05,
       Math.min(0.95, 1 - this.xrayTransparency / 100),
@@ -3844,32 +3940,45 @@ export class ViewportEngine {
       visual.faceOrientationFrontMesh !== null &&
       visual.faceOrientationBackMesh !== null;
 
-    const solidMat = visual.solidMesh.material;
     visual.solidMesh.visible =
       !faceOrientActive && !isWireframe && visual.hasFaces;
     visual.solidMesh.castShadow = false;
     visual.solidMesh.receiveShadow = false;
     visual.solidMesh.renderOrder = 0;
 
-    if (solidMat.transparent !== isXray) {
-      solidMat.transparent = isXray;
-      solidMat.needsUpdate = true;
+    if (isMaterial && objData) {
+      const targetMat = this.getOrCreateMaterialForObject(
+        objData,
+        visual.clayMaterial,
+      );
+      if (visual.solidMesh.material !== targetMat) {
+        visual.solidMesh.material = targetMat;
+      }
+    } else {
+      if (visual.solidMesh.material !== visual.clayMaterial) {
+        visual.solidMesh.material = visual.clayMaterial;
+      }
+      const solidMat = visual.clayMaterial;
+      if (solidMat.transparent !== isXray) {
+        solidMat.transparent = isXray;
+        solidMat.needsUpdate = true;
+      }
+      solidMat.opacity = isXray ? xrayOpacity : 1;
+      solidMat.depthWrite = !isXray;
+      solidMat.depthTest = true;
+      solidMat.roughness = 0.58;
+      solidMat.metalness = 0.06;
+      solidMat.polygonOffset = true;
+      solidMat.polygonOffsetFactor = 1;
+      solidMat.polygonOffsetUnits = 1;
+      // Solid & X-Ray always render with neutral studio grey (independent of object material)
+      solidMat.color.set(
+        inEditOnThis ? '#8b919c' : isSelected ? '#a9b1bc' : '#8c929d',
+      );
+      solidMat.emissive.setHex(
+        !inEditOnThis && isSelected && !isWireframe ? 0x241605 : 0x000000,
+      );
     }
-    solidMat.opacity = isXray ? xrayOpacity : 1;
-    solidMat.depthWrite = !isXray;
-    solidMat.depthTest = true;
-    solidMat.roughness = 0.58;
-    solidMat.metalness = 0.06;
-    solidMat.polygonOffset = true;
-    solidMat.polygonOffsetFactor = 1;
-    solidMat.polygonOffsetUnits = 1;
-    // Solid & X-Ray always render with neutral studio grey (independent of object material)
-    solidMat.color.set(
-      inEditOnThis ? '#8b919c' : isSelected ? '#a9b1bc' : '#8c929d',
-    );
-    solidMat.emissive.setHex(
-      !inEditOnThis && isSelected && !isWireframe ? 0x241605 : 0x000000,
-    );
 
     if (visual.faceOrientationFrontMesh && visual.faceOrientationBackMesh) {
       visual.faceOrientationFrontMesh.visible = faceOrientActive;
@@ -3981,7 +4090,7 @@ export class ViewportEngine {
   private rebuildObjectGeometry(visual: ObjectVisual): void {
     if (visual.objectType === 'reference_image') return;
     const mesh = visual.editableMesh;
-    const triData = mesh.buildTriangulatedData();
+    const triData = mesh.buildTriangulatedData(visual.shading);
 
     visual.hasFaces = triData.triangleToFaceId.length > 0;
     visual.triangleToFaceId = triData.triangleToFaceId;
@@ -4962,6 +5071,11 @@ export class ViewportEngine {
       this.disposeObjectVisual(visual);
     }
     this.visuals.clear();
+    for (const sharedMat of this.sharedMaterials.values()) {
+      sharedMat.dispose();
+    }
+    this.sharedMaterials.clear();
+    this.materialAssetMap.clear();
 
     this.renderer.dispose();
     if (dom.parentElement === this.container) {

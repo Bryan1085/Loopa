@@ -534,13 +534,60 @@ export class EditableMesh {
     );
   }
 
-  public buildTriangulatedData(): TriangulatedMeshData {
+  private computeSmoothVertexNormals(): Map<string, Vec3> {
+    const accum = new Map<string, [number, number, number]>();
+    for (const v of this.vertices) {
+      accum.set(v.id, [0, 0, 0]);
+    }
+
+    for (const face of this.faces) {
+      const n = face.vertexIds.length;
+      if (n < 3) continue;
+      let nx = 0;
+      let ny = 0;
+      let nz = 0;
+      for (let i = 0; i < n; i++) {
+        const curr = this.vertexMap.get(face.vertexIds[i])?.position;
+        const next = this.vertexMap.get(face.vertexIds[(i + 1) % n])?.position;
+        if (!curr || !next) continue;
+        nx += (curr[1] - next[1]) * (curr[2] + next[2]);
+        ny += (curr[2] - next[2]) * (curr[0] + next[0]);
+        nz += (curr[0] - next[0]) * (curr[1] + next[1]);
+      }
+      // Weight by face area (unnormalized Newell vector magnitude = 2 * area)
+      for (const vid of face.vertexIds) {
+        const sum = accum.get(vid);
+        if (sum) {
+          sum[0] += nx;
+          sum[1] += ny;
+          sum[2] += nz;
+        }
+      }
+    }
+
+    const result = new Map<string, Vec3>();
+    for (const [vid, sum] of accum.entries()) {
+      const len = Math.hypot(sum[0], sum[1], sum[2]);
+      if (len < 1e-8) {
+        result.set(vid, [0, 0, 1]);
+      } else {
+        result.set(vid, [sum[0] / len, sum[1] / len, sum[2] / len]);
+      }
+    }
+    return result;
+  }
+
+  public buildTriangulatedData(
+    shading: 'flat' | 'smooth' = 'flat',
+  ): TriangulatedMeshData {
     const posArr: number[] = [];
     const normArr: number[] = [];
     const includeUvs = this.hasUVs();
     const uvArr: number[] = [];
     const triangleToFaceId: string[] = [];
     const faceToTriangleRange = new Map<string, { start: number; count: number }>();
+    const smoothNormals =
+      shading === 'smooth' ? this.computeSmoothVertexNormals() : null;
 
     for (const face of this.faces) {
       const tris = this.triangulateFaceLocalIndices(face);
@@ -548,9 +595,6 @@ export class EditableMesh {
       const faceNormal = this.computeFaceNormal(face);
       const hasFaceUvs =
         Array.isArray(face.uvs) && face.uvs.length === face.vertexIds.length;
-      const hasFaceNormals =
-        Array.isArray(face.normals) &&
-        face.normals.length === face.vertexIds.length;
       const startTri = triangleToFaceId.length;
 
       for (const [i0, i1, i2] of tris) {
@@ -571,9 +615,18 @@ export class EditableMesh {
           v2.position[2],
         );
 
-        const n0 = hasFaceNormals ? face.normals![i0] : v0.normal ?? faceNormal;
-        const n1 = hasFaceNormals ? face.normals![i1] : v1.normal ?? faceNormal;
-        const n2 = hasFaceNormals ? face.normals![i2] : v2.normal ?? faceNormal;
+        const n0 =
+          shading === 'smooth'
+            ? smoothNormals?.get(v0.id) ?? faceNormal
+            : faceNormal;
+        const n1 =
+          shading === 'smooth'
+            ? smoothNormals?.get(v1.id) ?? faceNormal
+            : faceNormal;
+        const n2 =
+          shading === 'smooth'
+            ? smoothNormals?.get(v2.id) ?? faceNormal
+            : faceNormal;
 
         normArr.push(
           n0[0],

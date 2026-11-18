@@ -43,10 +43,24 @@ export interface ObjectTransform {
 import type { ModifierSlot } from '../modifiers/types';
 export type { ModifierSlot, ModifierType } from '../modifiers/types';
 
+export type ObjectShadingMode = 'flat' | 'smooth';
+
 export interface MaterialSlot {
   color: string;
   roughness: number;
   metalness: number;
+}
+
+export interface MaterialAsset {
+  id: string;
+  name: string;
+  baseColor: string;
+  metallic: number;
+  roughness: number;
+  opacity?: number;
+  emissiveColor?: string;
+  emissiveIntensity?: number;
+  textureName?: string;
 }
 
 export type SceneObjectType =
@@ -90,6 +104,8 @@ export interface SceneObjectData {
   transform: ObjectTransform;
   mesh: SerializedEditableMesh;
   material: MaterialSlot;
+  materialId?: string;
+  shading?: ObjectShadingMode;
   modifiers: ModifierSlot[];
   referenceImage?: ReferenceImageData;
 }
@@ -142,6 +158,7 @@ export interface ProjectData {
   thumbnailDataUrl?: string | null;
   thumbnailUpdatedAt?: number;
   activeSceneId: string;
+  materials?: MaterialAsset[];
   scenes: SceneData[];
 }
 

@@ -111,7 +111,12 @@ import {
   createProjectFromTemplate,
   addCollectionToScene,
   addSceneToProject,
+  createMaterialAsset,
   createReferenceImageObject,
+  DEFAULT_MATERIAL_COLOR,
+  DEFAULT_MATERIAL_METALLIC,
+  DEFAULT_MATERIAL_NAME,
+  DEFAULT_MATERIAL_ROUGHNESS,
   DeleteCollectionResolution,
   deleteCollectionFromScene,
   deleteSceneFromProject,
@@ -124,7 +129,9 @@ import {
   renameSceneInProject,
   setActiveCollectionInScene,
   switchSceneInProject,
+  syncProjectMaterialsAndObjects,
   toggleCollectionExpandedInScene,
+  toMaterialSlot,
   updateActiveScene,
 } from '../core/project/hierarchy';
 import {
@@ -141,8 +148,10 @@ import {
   ConfigurableToolKey,
   DeleteFolderResolution,
   GizmoTransformMode,
+  MaterialAsset,
   ModelerSettings,
   MoveSubMode,
+  ObjectShadingMode,
   ObjectTransform,
   ProjectData,
   ProjectFolder,
@@ -262,6 +271,7 @@ export interface ModalTransformState {
 
 interface HistorySnapshot {
   scenes: SceneData[];
+  materials: MaterialAsset[];
   activeSceneId: string;
   selectedObjectId: string | null;
   selectedObjectIds: string[];
@@ -274,6 +284,10 @@ const MAX_HISTORY = 50;
 
 function cloneScenes(scenes: SceneData[]): SceneData[] {
   return JSON.parse(JSON.stringify(scenes)) as SceneData[];
+}
+
+function cloneMaterials(materials?: MaterialAsset[]): MaterialAsset[] {
+  return JSON.parse(JSON.stringify(materials ?? [])) as MaterialAsset[];
 }
 
 export function useModelerStore() {
@@ -539,8 +553,10 @@ export function useModelerStore() {
       mode = workMode,
       subMode = editSelectionMode,
       compIds = selectedComponentIds,
+      mats = project.materials,
     ): HistorySnapshot => ({
       scenes: cloneScenes(scenes),
+      materials: cloneMaterials(mats),
       activeSceneId: actSceneId,
       selectedObjectId: selObjId,
       selectedObjectIds: Array.from(selObjIds),
@@ -550,6 +566,7 @@ export function useModelerStore() {
     }),
     [
       project.scenes,
+      project.materials,
       project.activeSceneId,
       selectedObjectId,
       selectedObjectIds,
@@ -558,6 +575,21 @@ export function useModelerStore() {
       selectedComponentIds,
     ],
   );
+
+  const projectMaterials = useMemo<MaterialAsset[]>(() => {
+    if (project.materials && project.materials.length > 0) {
+      return project.materials;
+    }
+    return [
+      createMaterialAsset({
+        id: 'mat_default',
+        name: DEFAULT_MATERIAL_NAME,
+        baseColor: DEFAULT_MATERIAL_COLOR,
+        metallic: DEFAULT_MATERIAL_METALLIC,
+        roughness: DEFAULT_MATERIAL_ROUGHNESS,
+      }),
+    ];
+  }, [project.materials]);
 
   const pushHistory = useCallback((snapshot: HistorySnapshot) => {
     undoStackRef.current.push(snapshot);
@@ -592,11 +624,14 @@ export function useModelerStore() {
       setModalTransform(null);
       setModalCancelNonce((n) => n + 1);
       redoStackRef.current.push(makeSnapshot());
-      setProject((p) => ({
-        ...p,
-        activeSceneId: prev.activeSceneId,
-        scenes: cloneScenes(prev.scenes),
-      }));
+      setProject((p) =>
+        syncProjectMaterialsAndObjects({
+          ...p,
+          activeSceneId: prev.activeSceneId,
+          materials: cloneMaterials(prev.materials),
+          scenes: cloneScenes(prev.scenes),
+        }),
+      );
       setSelectedObjectId(prev.selectedObjectId);
       setSelectedObjectIds(
         new Set(
@@ -627,11 +662,14 @@ export function useModelerStore() {
       setModalTransform(null);
       setModalCancelNonce((n) => n + 1);
       undoStackRef.current.push(makeSnapshot());
-      setProject((p) => ({
-        ...p,
-        activeSceneId: next.activeSceneId,
-        scenes: cloneScenes(next.scenes),
-      }));
+      setProject((p) =>
+        syncProjectMaterialsAndObjects({
+          ...p,
+          activeSceneId: next.activeSceneId,
+          materials: cloneMaterials(next.materials),
+          scenes: cloneScenes(next.scenes),
+        }),
+      );
       setSelectedObjectId(next.selectedObjectId);
       setSelectedObjectIds(
         new Set(
@@ -1197,6 +1235,7 @@ export function useModelerStore() {
           ? targetCollectionId
           : activeScene.activeCollectionId;
 
+      const defaultMat = projectMaterials[0];
       const newObj: SceneObjectData = {
         id: generateId('obj'),
         name,
@@ -1211,11 +1250,9 @@ export function useModelerStore() {
           scale: [1, 1, 1],
         },
         mesh: mesh.toJSON(),
-        material: {
-          color: '#9aa0a6',
-          roughness: 0.55,
-          metalness: 0.08,
-        },
+        materialId: defaultMat.id,
+        material: toMaterialSlot(defaultMat),
+        shading: 'flat',
         modifiers: [],
       };
 
@@ -1241,6 +1278,7 @@ export function useModelerStore() {
       activeScene.activeCollectionId,
       activeScene.collections,
       makeSnapshot,
+      projectMaterials,
       pushHistory,
       releaseScreenModifiers,
       setSingleSelectedObject,
@@ -1865,7 +1903,9 @@ export function useModelerStore() {
         scale: [...selectedObject.transform.scale] as Vec3,
       },
       mesh: sepRes.separatedMesh.toJSON(),
+      materialId: selectedObject.materialId,
       material: { ...selectedObject.material },
+      shading: selectedObject.shading ?? 'flat',
       modifiers: [],
     };
 
@@ -2229,33 +2269,61 @@ export function useModelerStore() {
         }
       }
 
-      const newObjects: SceneObjectData[] = result.parts.map((part) => ({
-        id: generateId('obj'),
-        name: part.name,
-        objectType: 'mesh',
-        primitiveType: 'custom',
-        collectionId: destCollectionId,
-        visible: true,
-        locked: false,
-        transform: {
-          position: [0, 0, 0],
-          rotation: [0, 0, 0],
-          scale: [1, 1, 1],
-        },
-        mesh: part.mesh.toJSON(),
-        material: part.material,
-        modifiers: [],
-      }));
+      let nextMaterials = [...projectMaterials];
+      const importedMatByKey = new Map<string, MaterialAsset>();
+      const fallbackMat = nextMaterials[0];
 
-      nextProject = updateActiveScene(nextProject, (scene) => ({
-        ...scene,
-        collections: scene.collections.map((c) =>
-          c.id === destCollectionId || c.id === baseColId
-            ? { ...c, expanded: true }
-            : c,
-        ),
-        objects: [...scene.objects, ...newObjects],
-      }));
+      const newObjects: SceneObjectData[] = result.parts.map((part) => {
+        let assignedMat = fallbackMat;
+        if (part.materialInfo) {
+          const existing = importedMatByKey.get(part.materialInfo.key);
+          if (existing) {
+            assignedMat = existing;
+          } else {
+            const created = createMaterialAsset({
+              name: part.materialInfo.name,
+              baseColor: part.materialInfo.baseColor,
+              metallic: part.materialInfo.metallic,
+              roughness: part.materialInfo.roughness,
+            });
+            nextMaterials = [...nextMaterials, created];
+            importedMatByKey.set(part.materialInfo.key, created);
+            assignedMat = created;
+          }
+        }
+        return {
+          id: generateId('obj'),
+          name: part.name,
+          objectType: 'mesh',
+          primitiveType: 'custom',
+          collectionId: destCollectionId,
+          visible: true,
+          locked: false,
+          transform: {
+            position: [0, 0, 0],
+            rotation: [0, 0, 0],
+            scale: [1, 1, 1],
+          },
+          mesh: part.mesh.toJSON(),
+          materialId: assignedMat.id,
+          material: toMaterialSlot(assignedMat),
+          shading: 'flat',
+          modifiers: [],
+        };
+      });
+
+      nextProject = {
+        ...updateActiveScene(nextProject, (scene) => ({
+          ...scene,
+          collections: scene.collections.map((c) =>
+            c.id === destCollectionId || c.id === baseColId
+              ? { ...c, expanded: true }
+              : c,
+          ),
+          objects: [...scene.objects, ...newObjects],
+        })),
+        materials: nextMaterials,
+      };
 
       setProject(nextProject);
       setOperatorSession(null);
@@ -2278,6 +2346,7 @@ export function useModelerStore() {
       activeScene.id,
       makeSnapshot,
       project,
+      projectMaterials,
       pushHistory,
       releaseScreenModifiers,
       setSingleSelectedObject,
@@ -2303,6 +2372,7 @@ export function useModelerStore() {
           ? result.name
           : `${result.name} ${existingCount + 1}`;
 
+      const defaultMat = projectMaterials[0];
       const newObj: SceneObjectData = {
         id: generateId('obj'),
         name: finalName,
@@ -2317,7 +2387,9 @@ export function useModelerStore() {
           scale: [1, 1, 1],
         },
         mesh: result.mesh.toJSON(),
-        material: result.material,
+        materialId: defaultMat.id,
+        material: toMaterialSlot(defaultMat),
+        shading: 'flat',
         modifiers: [],
       };
 
@@ -2346,11 +2418,314 @@ export function useModelerStore() {
       activeScene.activeCollectionId,
       activeScene.collections,
       makeSnapshot,
+      projectMaterials,
       pushHistory,
       releaseScreenModifiers,
       setSingleSelectedObject,
       showToast,
     ],
+  );
+
+  const importModelAsNewProject = useCallback(
+    async (
+      modelProject: ProjectData,
+    ): Promise<{ ok: boolean; project?: ProjectData; error?: string }> => {
+      const normalized = syncProjectMaterialsAndObjects(modelProject);
+      const res = await saveProjectAsync(normalized, {
+        thumbnailDataUrl: normalized.thumbnailDataUrl ?? null,
+        createBackup: false,
+      });
+      if (!res.ok || !res.project) {
+        return {
+          ok: false,
+          error:
+            res.error ?? 'No se pudo guardar el proyecto del modelo importado.',
+        };
+      }
+      await refreshGalleryData();
+      showToast(`Modelo "${res.project.name}" importado como proyecto`);
+      return { ok: true, project: res.project };
+    },
+    [refreshGalleryData, showToast],
+  );
+
+  /* ==========================================================================
+   * Material Library & Object Shading Actions
+   * ======================================================================== */
+  const createMaterial = useCallback(
+    (
+      initial?: Partial<Omit<MaterialAsset, 'id'>>,
+      assignToSelected = true,
+    ): MaterialAsset => {
+      pushHistory(makeSnapshot());
+      const existingNames = new Set(projectMaterials.map((m) => m.name));
+      let baseName = initial?.name?.trim() || 'Material';
+      if (existingNames.has(baseName)) {
+        let idx = projectMaterials.length + 1;
+        while (existingNames.has(`Material ${idx}`)) idx++;
+        baseName = `Material ${idx}`;
+      }
+      const created = createMaterialAsset({
+        ...initial,
+        name: baseName,
+      });
+
+      const targetIds = assignToSelected
+        ? Array.from(
+            selectedObjectIds.size > 0
+              ? selectedObjectIds
+              : selectedObjectId
+                ? [selectedObjectId]
+                : [],
+          )
+        : [];
+
+      setProject((p) => {
+        const nextMaterials = [...(p.materials ?? projectMaterials), created];
+        const nextProject: ProjectData = {
+          ...p,
+          materials: nextMaterials,
+          scenes: p.scenes.map((scene) => ({
+            ...scene,
+            objects: scene.objects.map((o) =>
+              o.objectType === 'mesh' && targetIds.includes(o.id)
+                ? {
+                    ...o,
+                    materialId: created.id,
+                    material: toMaterialSlot(created),
+                  }
+                : o,
+            ),
+          })),
+        };
+        return nextProject;
+      });
+      setHasUnsavedChanges(true);
+      showToast(`Material "${created.name}" creado`);
+      return created;
+    },
+    [
+      makeSnapshot,
+      projectMaterials,
+      pushHistory,
+      selectedObjectId,
+      selectedObjectIds,
+      showToast,
+    ],
+  );
+
+  const renameMaterial = useCallback(
+    (materialId: string, name: string) => {
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      const target = projectMaterials.find((m) => m.id === materialId);
+      if (!target || target.name === trimmed) return;
+      pushHistory(makeSnapshot());
+      setProject((p) => ({
+        ...p,
+        materials: (p.materials ?? projectMaterials).map((m) =>
+          m.id === materialId ? { ...m, name: trimmed } : m,
+        ),
+      }));
+      setHasUnsavedChanges(true);
+      showToast(`Material renombrado a "${trimmed}"`);
+    },
+    [makeSnapshot, projectMaterials, pushHistory, showToast],
+  );
+
+  const pushMaterialHistorySnapshot = useCallback(() => {
+    pushHistory(makeSnapshot());
+  }, [makeSnapshot, pushHistory]);
+
+  const updateMaterial = useCallback(
+    (
+      materialId: string,
+      patch: Partial<Omit<MaterialAsset, 'id'>>,
+      recordHistory = true,
+    ) => {
+      if (recordHistory) {
+        pushHistory(makeSnapshot());
+      }
+      setProject((p) => {
+        const currentMats = p.materials ?? projectMaterials;
+        const nextMats = currentMats.map((m) =>
+          m.id === materialId ? createMaterialAsset({ ...m, ...patch, id: m.id }, m.name) : m,
+        );
+        const updatedMat = nextMats.find((m) => m.id === materialId);
+        if (!updatedMat) return p;
+        const slot = toMaterialSlot(updatedMat);
+        return {
+          ...p,
+          materials: nextMats,
+          scenes: p.scenes.map((scene) => ({
+            ...scene,
+            objects: scene.objects.map((o) =>
+              o.objectType === 'mesh' && o.materialId === materialId
+                ? { ...o, material: slot }
+                : o,
+            ),
+          })),
+        };
+      });
+      setHasUnsavedChanges(true);
+    },
+    [makeSnapshot, projectMaterials, pushHistory],
+  );
+
+  const duplicateMaterial = useCallback(
+    (materialId: string, assignToSelected = true): MaterialAsset | null => {
+      const source = projectMaterials.find((m) => m.id === materialId);
+      if (!source) return null;
+      pushHistory(makeSnapshot());
+
+      const existingNames = new Set(projectMaterials.map((m) => m.name));
+      let copyName = `${source.name} Copia`;
+      if (existingNames.has(copyName)) {
+        let idx = 2;
+        while (existingNames.has(`${source.name} Copia ${idx}`)) idx++;
+        copyName = `${source.name} Copia ${idx}`;
+      }
+
+      const copy = createMaterialAsset({
+        ...source,
+        id: undefined,
+        name: copyName,
+      });
+
+      const targetIds = assignToSelected
+        ? Array.from(
+            selectedObjectIds.size > 0
+              ? selectedObjectIds
+              : selectedObjectId
+                ? [selectedObjectId]
+                : [],
+          )
+        : [];
+
+      setProject((p) => ({
+        ...p,
+        materials: [...(p.materials ?? projectMaterials), copy],
+        scenes: p.scenes.map((scene) => ({
+          ...scene,
+          objects: scene.objects.map((o) =>
+            o.objectType === 'mesh' && targetIds.includes(o.id)
+              ? {
+                  ...o,
+                  materialId: copy.id,
+                  material: toMaterialSlot(copy),
+                }
+              : o,
+          ),
+        })),
+      }));
+      setHasUnsavedChanges(true);
+      showToast(`Material "${copy.name}" duplicado`);
+      return copy;
+    },
+    [
+      makeSnapshot,
+      projectMaterials,
+      pushHistory,
+      selectedObjectId,
+      selectedObjectIds,
+      showToast,
+    ],
+  );
+
+  const deleteMaterial = useCallback(
+    (materialId: string): { ok: boolean; error?: string } => {
+      if (projectMaterials.length <= 1) {
+        const error = 'Debe permanecer al menos un material en el proyecto.';
+        showToast(error);
+        return { ok: false, error };
+      }
+      if (!projectMaterials.some((m) => m.id === materialId)) {
+        return { ok: false, error: 'Material no encontrado.' };
+      }
+      pushHistory(makeSnapshot());
+
+      const remaining = projectMaterials.filter((m) => m.id !== materialId);
+      const fallback = remaining[0];
+      const fallbackSlot = toMaterialSlot(fallback);
+
+      setProject((p) => ({
+        ...p,
+        materials: remaining,
+        scenes: p.scenes.map((scene) => ({
+          ...scene,
+          objects: scene.objects.map((o) =>
+            o.objectType === 'mesh' && o.materialId === materialId
+              ? {
+                  ...o,
+                  materialId: fallback.id,
+                  material: fallbackSlot,
+                }
+              : o,
+          ),
+        })),
+      }));
+      setHasUnsavedChanges(true);
+      showToast(`Material eliminado (objetos reasignados a "${fallback.name}")`);
+      return { ok: true };
+    },
+    [makeSnapshot, projectMaterials, pushHistory, showToast],
+  );
+
+  const assignMaterialToObjects = useCallback(
+    (objectIds: string[], materialId: string) => {
+      const mat = projectMaterials.find((m) => m.id === materialId);
+      if (!mat || objectIds.length === 0) return;
+      const targetSet = new Set(objectIds);
+      pushHistory(makeSnapshot());
+      const slot = toMaterialSlot(mat);
+
+      setProject((p) => ({
+        ...p,
+        scenes: p.scenes.map((scene) => ({
+          ...scene,
+          objects: scene.objects.map((o) =>
+            o.objectType === 'mesh' && targetSet.has(o.id)
+              ? { ...o, materialId: mat.id, material: slot }
+              : o,
+          ),
+        })),
+      }));
+      setHasUnsavedChanges(true);
+      showToast(
+        objectIds.length > 1
+          ? `Material "${mat.name}" asignado a ${objectIds.length} objetos`
+          : `Material "${mat.name}" asignado`,
+      );
+    },
+    [makeSnapshot, projectMaterials, pushHistory, showToast],
+  );
+
+  const setObjectShading = useCallback(
+    (objectId: string, shading: ObjectShadingMode) => {
+      const target = project.scenes
+        .flatMap((s) => s.objects)
+        .find((o) => o.id === objectId);
+      if (!target || target.objectType !== 'mesh') return;
+      if ((target.shading ?? 'flat') === shading) return;
+      pushHistory(makeSnapshot());
+      setProject((p) => ({
+        ...p,
+        scenes: p.scenes.map((scene) => ({
+          ...scene,
+          objects: scene.objects.map((o) =>
+            o.id === objectId ? { ...o, shading } : o,
+          ),
+        })),
+      }));
+      setHasUnsavedChanges(true);
+      setMeshRevision((r) => r + 1);
+      showToast(
+        shading === 'smooth'
+          ? `"${target.name}": Shade Smooth activado`
+          : `"${target.name}": Shade Flat activado`,
+      );
+    },
+    [makeSnapshot, project.scenes, pushHistory, showToast],
   );
 
   const addReferenceImage = useCallback(
@@ -2746,21 +3121,27 @@ export function useModelerStore() {
     [operatorSession, screenShiftActive],
   );
 
-  const lastNonXrayModeRef = useRef<'solid' | 'wireframe'>(
-    settings.displayMode === 'wireframe' ? 'wireframe' : 'solid',
+  const lastNonXrayModeRef = useRef<'solid' | 'wireframe' | 'material'>(
+    settings.displayMode === 'wireframe' || settings.displayMode === 'material'
+      ? settings.displayMode
+      : 'solid',
   );
 
   const updateSettings = useCallback((patch: Partial<ModelerSettings>) => {
     setSettings((prev) => {
       const nextDisplayMode: ViewportDisplayMode =
-        patch.displayMode && patch.displayMode !== 'material'
+        patch.displayMode
           ? patch.displayMode
           : patch.xrayEditMode !== undefined
             ? patch.xrayEditMode
               ? 'xray'
               : lastNonXrayModeRef.current
             : prev.displayMode;
-      if (nextDisplayMode === 'solid' || nextDisplayMode === 'wireframe') {
+      if (
+        nextDisplayMode === 'solid' ||
+        nextDisplayMode === 'wireframe' ||
+        nextDisplayMode === 'material'
+      ) {
         lastNonXrayModeRef.current = nextDisplayMode;
       }
       const nextXrayTransparency =
@@ -2783,16 +3164,12 @@ export function useModelerStore() {
 
   const setDisplayMode = useCallback(
     (mode: ViewportDisplayMode) => {
-      if (mode === 'material') {
-        showToast('Vista de material disponible en una futura actualización');
-        return;
-      }
       updateSettings({
         displayMode: mode,
         xrayEditMode: mode === 'xray',
       });
     },
-    [showToast, updateSettings],
+    [updateSettings],
   );
 
   const setXrayTransparency = useCallback(
@@ -2807,7 +3184,11 @@ export function useModelerStore() {
     setSettings((prev) => {
       const nextMode: ViewportDisplayMode =
         prev.displayMode === 'xray' ? lastNonXrayModeRef.current : 'xray';
-      if (prev.displayMode === 'solid' || prev.displayMode === 'wireframe') {
+      if (
+        prev.displayMode === 'solid' ||
+        prev.displayMode === 'wireframe' ||
+        prev.displayMode === 'material'
+      ) {
         lastNonXrayModeRef.current = prev.displayMode;
       }
       const next: ModelerSettings = {
@@ -4927,6 +5308,16 @@ export function useModelerStore() {
     moveObjectToCollection,
     importObjParts,
     importStlResult,
+    importModelAsNewProject,
+    materials: projectMaterials,
+    createMaterial,
+    renameMaterial,
+    pushMaterialHistorySnapshot,
+    updateMaterial,
+    duplicateMaterial,
+    deleteMaterial,
+    assignMaterialToObjects,
+    setObjectShading,
     addReferenceImage,
     updateReferenceImageProps,
     showToast,

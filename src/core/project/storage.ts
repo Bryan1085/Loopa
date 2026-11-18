@@ -389,11 +389,13 @@ function normalizeDisplayMode(
   mode: unknown,
   legacyXray?: boolean,
 ): ViewportDisplayMode {
-  if (mode === 'wireframe' || mode === 'solid' || mode === 'xray') {
+  if (
+    mode === 'wireframe' ||
+    mode === 'solid' ||
+    mode === 'xray' ||
+    mode === 'material'
+  ) {
     return mode;
-  }
-  if (mode === 'material') {
-    return 'solid';
   }
   return legacyXray ? 'xray' : 'solid';
 }

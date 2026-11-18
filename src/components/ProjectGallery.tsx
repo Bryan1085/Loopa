@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   Check,
   CheckSquare,
   Clock,
   Copy,
   Download,
   Edit3,
+  FileBox,
   Folder,
   FolderInput,
+  FolderMinus,
   FolderOpen,
   FolderPlus,
   Info,
@@ -88,6 +91,10 @@ interface ProjectGalleryProps {
     rawText: string,
     targetFolderId: string | null,
   ) => Promise<{ ok: boolean; project?: ProjectData; error?: string }>;
+  onImportModelFiles: (
+    fileList: FileList,
+    targetFolderId: string | null,
+  ) => void;
   onApplyRecoveryDraft: (record: ProjectRecoveryRecord) => Promise<void>;
   onDiscardRecoveryDraft: (projectId: string) => Promise<void>;
   onNotify: (msg: string) => void;
@@ -141,6 +148,7 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
   onDeleteFolder,
   onExportNativeProject,
   onImportNativeProject,
+  onImportModelFiles,
   onApplyRecoveryDraft,
   onDiscardRecoveryDraft,
   onNotify,
@@ -183,6 +191,7 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
   const [showAboutModal, setShowAboutModal] = useState(false);
 
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const modelImportInputRef = useRef<HTMLInputElement | null>(null);
   const fallbackThumb = useMemo(
     () => generateTemplateThumbnailDataUrl('cube'),
     [],
@@ -296,7 +305,7 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
   const openMenuAtAnchor = useCallback(
     (project: ProjectSummary, clientX: number, clientY: number) => {
       const menuW = 228;
-      const menuH = supportsShare ? 320 : 280;
+      const menuH = supportsShare ? 360 : 320;
       const left = Math.max(8, Math.min(window.innerWidth - menuW - 8, clientX));
       const top = Math.max(8, Math.min(window.innerHeight - menuH - 8, clientY));
       setActionMenu({ project, left, top });
@@ -560,7 +569,7 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
                   onClick={() => setRenamingFolder(folder)}
                   title="Renombrar carpeta"
                   aria-label={`Renombrar carpeta ${folder.name}`}
-                  className="w-7 h-7 rounded hover:bg-[#313643] text-[#9ca3af] hover:text-white flex items-center justify-center opacity-80 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
+                  className="w-7 h-7 rounded hover:bg-[#313643] text-[#9ca3af] hover:text-white flex items-center justify-center opacity-85 hover:opacity-100 transition-opacity shrink-0"
                 >
                   <Edit3 className="w-3.5 h-3.5" />
                 </button>
@@ -569,7 +578,7 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
                   onClick={() => setDeletingFolder(folder)}
                   title="Eliminar carpeta"
                   aria-label={`Eliminar carpeta ${folder.name}`}
-                  className="w-7 h-7 rounded hover:bg-[#3a2226] text-[#e06c75] flex items-center justify-center opacity-80 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
+                  className="w-7 h-7 rounded hover:bg-[#3a2226] text-[#e06c75] flex items-center justify-center opacity-85 hover:opacity-100 transition-opacity shrink-0"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
@@ -779,6 +788,21 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
         }}
       />
 
+      {/* Hidden 3D model importer (OBJ + optional MTL, STL) */}
+      <input
+        ref={modelImportInputRef}
+        type="file"
+        accept=".obj,.mtl,.stl"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            onImportModelFiles(e.target.files, defaultNewProjectFolder);
+          }
+          e.target.value = '';
+        }}
+      />
+
       {/* Top Studio Header */}
       <header className="shrink-0 bg-[#181a1f] border-b border-[#272b34] px-3 sm:px-5 py-3 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2.5 min-w-0">
@@ -840,10 +864,22 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
           <button
             type="button"
             onClick={() => importInputRef.current?.click()}
+            title="Importar proyecto nativo (.forma3d.json)"
             className="min-h-[40px] px-3 rounded-lg bg-[#22252d] hover:bg-[#2a2e38] border border-[#323640] text-xs font-semibold text-[#e4e6eb] flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
           >
             <Upload className="w-4 h-4 text-[#5ecd6e]" />
-            <span className="hidden sm:inline">Importar</span>
+            <span className="hidden md:inline">Proyecto</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="gallery-import-model-btn"
+            onClick={() => modelImportInputRef.current?.click()}
+            title="Importar modelo 3D (.obj + .mtl o .stl) como nuevo proyecto"
+            className="min-h-[40px] px-3 rounded-lg bg-[#22252d] hover:bg-[#2a2e38] border border-[#323640] text-xs font-semibold text-[#e4e6eb] flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+          >
+            <FileBox className="w-4 h-4 text-[#5ecd6e]" />
+            <span className="hidden sm:inline">Importar modelo</span>
           </button>
 
           <button
@@ -921,9 +957,91 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
             </div>
           )}
 
+          {/* Procreate-style Quick Folder Strip + Breadcrumb Bar */}
+          <div className="shrink-0 px-3 sm:px-6 pt-3 pb-1 space-y-2 border-b border-[#1d2028]">
+            <div className="flex items-center gap-1.5 overflow-x-auto cad-scroll pb-1">
+              <button
+                type="button"
+                onClick={() => setSelectedFolderFilter('all')}
+                className={`h-8 px-3 rounded-lg border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
+                  selectedFolderFilter === 'all'
+                    ? 'bg-[#262a34] border-[#5ecd6e]/65 text-[#5ecd6e]'
+                    : 'bg-[#17191f] border-[#262932] text-[#cbd5e1] hover:bg-[#1e2129]'
+                }`}
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                <span>Todos</span>
+                <span className="text-[10px] font-mono-tabular opacity-75">
+                  {projects.length}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSelectedFolderFilter('unfiled')}
+                className={`h-8 px-3 rounded-lg border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
+                  selectedFolderFilter === 'unfiled'
+                    ? 'bg-[#262a34] border-[#5ecd6e]/65 text-[#5ecd6e]'
+                    : 'bg-[#17191f] border-[#262932] text-[#cbd5e1] hover:bg-[#1e2129]'
+                }`}
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                <span>Sin carpeta</span>
+                <span className="text-[10px] font-mono-tabular opacity-75">
+                  {folderCounts.unfiled}
+                </span>
+              </button>
+
+              {folders.map((folder) => {
+                const active = selectedFolderFilter === folder.id;
+                const count = folderCounts.counts.get(folder.id) ?? 0;
+                return (
+                  <button
+                    key={folder.id}
+                    type="button"
+                    onClick={() => setSelectedFolderFilter(folder.id)}
+                    className={`h-8 px-3 rounded-lg border text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
+                      active
+                        ? 'bg-[#262a34] border-[#5ecd6e]/65 text-[#5ecd6e]'
+                        : 'bg-[#17191f] border-[#262932] text-[#cbd5e1] hover:bg-[#1e2129]'
+                    }`}
+                  >
+                    <Folder className="w-3.5 h-3.5 shrink-0" />
+                    <span className="max-w-[140px] truncate">{folder.name}</span>
+                    <span className="text-[10px] font-mono-tabular opacity-75">
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileDrawerOpen(true);
+                  setShowNewFolderInput(true);
+                }}
+                className="h-8 px-2.5 rounded-lg border border-dashed border-[#343a47] hover:border-[#5ecd6e]/65 text-xs font-semibold text-[#5ecd6e] flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
+              >
+                <FolderPlus className="w-3.5 h-3.5" />
+                <span>Carpeta</span>
+              </button>
+            </div>
+          </div>
+
           {/* Filter / Search / Sort Toolbar */}
-          <div className="shrink-0 px-3 sm:px-6 pt-4 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-            <div className="flex items-baseline gap-2.5 min-w-0">
+          <div className="shrink-0 px-3 sm:px-6 pt-3 pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 min-w-0 flex-wrap">
+              {selectedFolderFilter !== 'all' && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedFolderFilter('all')}
+                  className="h-8 px-2.5 rounded-lg bg-[#1d2027] hover:bg-[#262a34] border border-[#2f3440] text-xs font-semibold text-[#5ecd6e] flex items-center gap-1 shrink-0 transition-colors"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Todos</span>
+                </button>
+              )}
               <h2 className="text-base sm:text-lg font-bold text-[#f3f4f6] tracking-tight truncate">
                 {currentSectionTitle}
               </h2>
@@ -931,6 +1049,30 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
                 {filteredProjects.length} proyecto
                 {filteredProjects.length === 1 ? '' : 's'}
               </span>
+              {defaultNewProjectFolder && folderMap.get(defaultNewProjectFolder) && (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setRenamingFolder(folderMap.get(defaultNewProjectFolder)!)
+                    }
+                    title="Renombrar carpeta actual"
+                    className="w-7 h-7 rounded-md bg-[#1a1d24] hover:bg-[#262a34] border border-[#2c303a] text-[#cbd5e1] hover:text-white flex items-center justify-center"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setDeletingFolder(folderMap.get(defaultNewProjectFolder)!)
+                    }
+                    title="Eliminar carpeta actual"
+                    className="w-7 h-7 rounded-md bg-[#1a1d24] hover:bg-[#3a2226] border border-[#2c303a] text-[#e06c75] flex items-center justify-center"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
@@ -1043,7 +1185,7 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
                   </p>
                 </div>
                 {!searchQuery.trim() && (
-                  <div className="pt-1 flex items-center justify-center gap-2">
+                  <div className="pt-1 flex flex-wrap items-center justify-center gap-2">
                     <button
                       type="button"
                       onClick={() => setShowNewProjectModal(true)}
@@ -1051,6 +1193,14 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
                     >
                       <Plus className="w-4 h-4 stroke-[2.5]" />
                       <span>Nuevo proyecto</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => modelImportInputRef.current?.click()}
+                      className="min-h-[42px] px-4 rounded-lg bg-[#22252d] hover:bg-[#2c313b] border border-[#343946] text-xs font-semibold text-[#e4e6eb] inline-flex items-center gap-1.5"
+                    >
+                      <FileBox className="w-4 h-4 text-[#5ecd6e]" />
+                      <span>Importar modelo</span>
                     </button>
                     <button
                       type="button"
@@ -1213,6 +1363,23 @@ export const ProjectGallery: React.FC<ProjectGalleryProps> = ({
               <FolderInput className="w-4 h-4 text-[#cbd5e1]" />
               <span>Mover a carpeta</span>
             </button>
+
+            {actionMenu.project.folderId &&
+              folderMap.has(actionMenu.project.folderId) && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    const id = actionMenu.project.id;
+                    setActionMenu(null);
+                    void onMoveProjectsToFolder([id], null);
+                  }}
+                  className="w-full min-h-[40px] px-2.5 rounded-lg hover:bg-[#252932] text-xs font-medium text-[#e4e6eb] flex items-center gap-2.5 text-left"
+                >
+                  <FolderMinus className="w-4 h-4 text-[#f59e0b]" />
+                  <span>Sacar de carpeta</span>
+                </button>
+              )}
 
             <button
               type="button"

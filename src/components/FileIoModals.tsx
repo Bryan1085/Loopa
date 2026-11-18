@@ -23,6 +23,8 @@ export interface PendingStlImport {
   fileSizeBytes: number;
   buffer: ArrayBuffer;
   inspection: StlInspectionResult;
+  targetGalleryFolderId?: string | null;
+  isGalleryImport?: boolean;
 }
 
 export type ExportScope = 'selected' | 'multiple' | 'scene';
@@ -70,6 +72,12 @@ export const StlImportModal: React.FC<{
         </div>
 
         <div className="p-4 space-y-4">
+          {pending.isGalleryImport && (
+            <div className="rounded-lg bg-[#16261a] border border-[#5ecd6e]/40 px-3 py-2 text-[11px] text-[#7def8e]">
+              Se creará un nuevo proyecto independiente en tu galería con este modelo.
+            </div>
+          )}
+
           <div className="rounded-lg bg-[#121418] border border-[#262931] p-3 space-y-1.5 text-xs">
             <div className="font-semibold text-[#f3f4f6] truncate">
               {pending.fileName}

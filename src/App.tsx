@@ -31,6 +31,7 @@ import {
   stripFileExtension,
   triggerFileDownload,
 } from './core/io/meshUtils';
+import { buildImportedModelProjectData } from './core/io/modelThumbnail';
 import { exportObjectsToObj } from './core/io/objExport';
 import { parseObjContent } from './core/io/objImport';
 import { exportObjectsToStl } from './core/io/stlExport';
@@ -280,10 +281,32 @@ export default function App() {
             });
           },
         });
-        store.importStlResult(result);
-        setIoProgress(null);
-        if (result.warnings.length > 0) {
-          store.showToast(result.warnings[0]);
+        if (target.isGalleryImport) {
+          const modelProject = buildImportedModelProjectData({
+            projectName: result.name,
+            folderId: target.targetGalleryFolderId ?? null,
+            stlResult: result,
+          });
+          const res = await store.importModelAsNewProject(modelProject);
+          setIoProgress(null);
+          if (!res.ok) {
+            setIoError({
+              title: 'Error al guardar proyecto STL',
+              message:
+                res.error ??
+                'No se pudo crear el proyecto en la galería.',
+            });
+            return;
+          }
+          if (result.warnings.length > 0) {
+            store.showToast(result.warnings[0]);
+          }
+        } else {
+          store.importStlResult(result);
+          setIoProgress(null);
+          if (result.warnings.length > 0) {
+            store.showToast(result.warnings[0]);
+          }
         }
       } catch (err) {
         setIoProgress(null);
@@ -297,6 +320,127 @@ export default function App() {
       }
     },
     [pendingStl, store],
+  );
+
+  const handleGalleryModelFilesSelected = useCallback(
+    async (fileList: FileList, targetFolderId: string | null) => {
+      const files = Array.from(fileList);
+      if (files.length === 0) return;
+
+      const objFile = files.find((f) => f.name.toLowerCase().endsWith('.obj'));
+      const mtlFile = files.find((f) => f.name.toLowerCase().endsWith('.mtl'));
+      const stlFile = files.find((f) => f.name.toLowerCase().endsWith('.stl'));
+
+      if (objFile) {
+        if (objFile.size === 0) {
+          setIoError({
+            title: 'Archivo OBJ vacío',
+            message: `El archivo "${objFile.name}" no contiene datos.`,
+          });
+          return;
+        }
+        if (objFile.size > MAX_IMPORT_FILE_BYTES) {
+          setIoError({
+            title: 'Archivo demasiado grande',
+            message: `El archivo "${objFile.name}" supera el límite seguro de ${Math.round(MAX_IMPORT_FILE_BYTES / (1024 * 1024))} MB.`,
+          });
+          return;
+        }
+        try {
+          setIoProgress({
+            title: 'Importando modelo OBJ a galería',
+            label: `Leyendo "${objFile.name}"...`,
+            progress: 0.05,
+          });
+          const objText = await objFile.text();
+          const mtlText = mtlFile ? await mtlFile.text() : undefined;
+          const result = await parseObjContent(objText, objFile.name, {
+            mtlText,
+            onProgress: (progress, label) => {
+              setIoProgress({
+                title: 'Importando modelo OBJ a galería',
+                label,
+                progress,
+              });
+            },
+          });
+          const modelProject = buildImportedModelProjectData({
+            projectName: stripFileExtension(objFile.name),
+            folderId: targetFolderId,
+            objParts: result.parts,
+          });
+          const res = await store.importModelAsNewProject(modelProject);
+          setIoProgress(null);
+          if (!res.ok) {
+            setIoError({
+              title: 'Error al guardar modelo OBJ',
+              message:
+                res.error ??
+                'No se pudo crear el proyecto en la galería.',
+            });
+            return;
+          }
+          if (result.warnings.length > 0) {
+            store.showToast(result.warnings[0]);
+          }
+        } catch (err) {
+          setIoProgress(null);
+          setIoError({
+            title: 'Error al importar OBJ',
+            message:
+              err instanceof Error
+                ? err.message
+                : 'El archivo OBJ está dañado o no pudo procesarse.',
+          });
+        }
+        return;
+      }
+
+      if (stlFile) {
+        if (stlFile.size === 0) {
+          setIoError({
+            title: 'Archivo STL vacío',
+            message: `El archivo "${stlFile.name}" está vacío.`,
+          });
+          return;
+        }
+        if (stlFile.size > MAX_IMPORT_FILE_BYTES) {
+          setIoError({
+            title: 'Archivo demasiado grande',
+            message: `El archivo "${stlFile.name}" supera el límite seguro de ${Math.round(MAX_IMPORT_FILE_BYTES / (1024 * 1024))} MB.`,
+          });
+          return;
+        }
+        try {
+          const buffer = await stlFile.arrayBuffer();
+          const inspection = inspectStlBuffer(buffer);
+          setPendingStl({
+            fileName: stlFile.name,
+            fileSizeBytes: stlFile.size,
+            buffer,
+            inspection,
+            targetGalleryFolderId: targetFolderId,
+            isGalleryImport: true,
+          });
+        } catch (err) {
+          setIoError({
+            title: 'Error al leer STL',
+            message:
+              err instanceof Error
+                ? err.message
+                : 'El archivo STL está dañado o no es compatible.',
+          });
+        }
+        return;
+      }
+
+      setIoError({
+        title: 'Formato no compatible',
+        message:
+          'Selecciona un modelo .obj (opcionalmente con .mtl) o un archivo .stl.',
+      });
+    },
+    [store],
   );
 
   const handleImageFileSelected = useCallback(
@@ -374,6 +518,7 @@ export default function App() {
           const result = await exportObjectsToObj(evaluatedTargets, {
             applyTransform: config.applyTransform,
             exportScale: config.exportScale,
+            materials: store.materials,
             onProgress: (progress, label) => {
               setIoProgress({
                 title: 'Exportando modelo OBJ',
@@ -979,6 +1124,7 @@ export default function App() {
         <Viewport3D
           ref={viewportRef}
           objects={store.renderedObjects}
+          materials={store.materials}
           selectedObject={store.selectedObject}
           selectedObjectId={store.selectedObjectId}
           selectedObjectIds={store.selectedObjectIds}
@@ -1132,6 +1278,17 @@ export default function App() {
             onApplyModifier={store.applyModifier}
             onRecalculateNormalsOutside={store.recalculateObjectNormalsOutside}
             onFlipNormals={store.flipObjectNormals}
+            materials={store.materials}
+            displayMode={store.settings.displayMode}
+            onActivateMaterialPreview={() => store.setDisplayMode('material')}
+            onCreateMaterial={store.createMaterial}
+            onRenameMaterial={store.renameMaterial}
+            onPushMaterialHistory={store.pushMaterialHistorySnapshot}
+            onUpdateMaterial={store.updateMaterial}
+            onDuplicateMaterial={store.duplicateMaterial}
+            onDeleteMaterial={store.deleteMaterial}
+            onAssignMaterialToObjects={store.assignMaterialToObjects}
+            onSetObjectShading={store.setObjectShading}
             onClose={() => setShowOutliner(false)}
           />
         )}
@@ -1158,6 +1315,9 @@ export default function App() {
           onDeleteFolder={store.deleteFolder}
           onExportNativeProject={store.exportNativeProject}
           onImportNativeProject={store.importNativeProject}
+          onImportModelFiles={(files, targetFolderId) => {
+            void handleGalleryModelFilesSelected(files, targetFolderId);
+          }}
           onApplyRecoveryDraft={async (record) => {
             await store.applyRecoveryDraft(record);
             enterModelerWithResetCamera();

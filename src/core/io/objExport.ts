@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
-import { SceneObjectData } from '../project/types';
+import { MaterialAsset, SceneObjectData } from '../project/types';
 import {
   buildThreeMeshForExport,
   ProgressCallback,
@@ -60,6 +60,7 @@ export async function exportObjectsToObj(
   options: {
     applyTransform?: boolean;
     exportScale?: number;
+    materials?: MaterialAsset[];
     onProgress?: ProgressCallback;
   } = {},
 ): Promise<ObjExportResult> {
@@ -82,6 +83,7 @@ export async function exportObjectsToObj(
     const threeMesh = buildThreeMeshForExport(obj, {
       applyTransform,
       exportScale,
+      materials: options.materials,
     });
     if (threeMesh) {
       exportGroup.add(threeMesh);
@@ -116,7 +118,7 @@ export async function exportObjectsToObj(
     }
   }
 
-  const header = `# Exportado desde Modeler 3D\n# Objetos: ${createdMeshes.length}\n`;
+  const header = `# Exportado desde LOOPA\n# Objetos: ${createdMeshes.length}\n`;
   options.onProgress?.(1, 'OBJ generado');
 
   return {

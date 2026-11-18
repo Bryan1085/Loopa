@@ -17,6 +17,7 @@ import { PrimitiveOptions, PrimitiveType } from '../core/mesh/primitives';
 import {
   AxisConstraint,
   CameraProjection,
+  MaterialAsset,
   ModelerSettings,
   ObjectTransform,
   SceneObjectData,
@@ -63,6 +64,7 @@ export interface Viewport3DHandle {
 
 interface Viewport3DProps {
   objects: SceneObjectData[];
+  materials: MaterialAsset[];
   selectedObject: SceneObjectData | null;
   selectedObjectId: string | null;
   selectedObjectIds?: Set<string>;
@@ -179,6 +181,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
   (
     {
       objects,
+      materials,
       selectedObject,
       selectedObjectId,
       selectedObjectIds,
@@ -614,6 +617,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
   useEffect(() => {
     engineRef.current?.syncScene({
       objects,
+      materials,
       selectedObjectId,
       selectedObjectIds,
       workMode,
@@ -644,6 +648,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
     });
   }, [
     objects,
+    materials,
     selectedObjectId,
     selectedObjectIds,
     workMode,

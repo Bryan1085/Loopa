@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { EditableMesh, Vec2, Vec3 } from '../mesh/EditableMesh';
-import { SceneObjectData } from '../project/types';
+import { resolveObjectMaterial } from '../project/hierarchy';
+import { MaterialAsset, SceneObjectData } from '../project/types';
 
 export const MAX_IMPORT_FILE_BYTES = 64 * 1024 * 1024; // 64 MB safety cap
 export const MAX_IMPORT_TRIANGLES = 350_000;
@@ -19,8 +20,8 @@ export function stripFileExtension(fileName: string): string {
   return fileName.slice(0, idx) || 'Modelo';
 }
 
-export function sanitizeObjIdentifier(name: string): string {
-  const cleaned = name
+export function sanitizeObjIdentifier(name?: string | null): string {
+  const cleaned = String(name ?? '')
     .trim()
     .replace(/[^\w.-]+/g, '_')
     .replace(/^_+|_+$/g, '');
@@ -206,12 +207,13 @@ export function buildThreeMeshForExport(
   options: {
     applyTransform: boolean;
     exportScale?: number;
+    materials?: MaterialAsset[];
   },
 ): THREE.Mesh | null {
   if (obj.objectType !== 'mesh') return null;
 
   const editable = EditableMesh.fromJSON(obj.mesh);
-  const triData = editable.buildTriangulatedData();
+  const triData = editable.buildTriangulatedData(obj.shading ?? 'flat');
   if (triData.positions.length === 0) return null;
 
   const geometry = new THREE.BufferGeometry();
@@ -221,12 +223,13 @@ export function buildThreeMeshForExport(
     geometry.setAttribute('uv', new THREE.BufferAttribute(triData.uvs, 2));
   }
 
+  const resolvedMat = resolveObjectMaterial(obj, options.materials);
   const material = new THREE.MeshStandardMaterial({
-    color: obj.material.color,
-    roughness: obj.material.roughness,
-    metalness: obj.material.metalness,
+    color: resolvedMat.baseColor,
+    roughness: resolvedMat.roughness,
+    metalness: resolvedMat.metallic,
   });
-  material.name = sanitizeObjIdentifier(`${obj.name}_mat`);
+  material.name = sanitizeObjIdentifier(resolvedMat.name || `${obj.name}_mat`);
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.name = sanitizeObjIdentifier(obj.name);

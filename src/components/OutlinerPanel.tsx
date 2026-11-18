@@ -18,10 +18,12 @@ import {
   Layers,
   Lock,
   MoreVertical,
+  Palette,
   Pencil,
   Plus,
   Pyramid,
   SlidersHorizontal,
+  Sparkles,
   Square,
   Sun,
   Trash2,
@@ -43,11 +45,14 @@ import {
 } from '../core/project/hierarchy';
 import {
   CollectionData,
+  MaterialAsset,
+  ObjectShadingMode,
   ObjectTransform,
   ReferenceImageData,
   ReferenceImageOrientation,
   SceneData,
   SceneObjectData,
+  ViewportDisplayMode,
   WorkMode,
 } from '../core/project/types';
 import {
@@ -55,7 +60,9 @@ import {
   ModifierSlot,
   ModifierType,
 } from '../core/modifiers/types';
+import { MaterialPanel } from './MaterialPanel';
 import { ModifierStackPanel } from './ModifierStackPanel';
+import { NumericFieldInput } from './NumericFieldInput';
 
 interface OutlinerPanelProps {
   scenes: SceneData[];
@@ -134,6 +141,27 @@ interface OutlinerPanelProps {
   onApplyModifier: (objectId: string, modifierId: string) => void;
   onRecalculateNormalsOutside?: (objectId: string) => void;
   onFlipNormals?: (objectId: string) => void;
+  materials: MaterialAsset[];
+  displayMode: ViewportDisplayMode;
+  onActivateMaterialPreview: () => void;
+  onCreateMaterial: (
+    initial?: Partial<Omit<MaterialAsset, 'id'>>,
+    assignToSelected?: boolean,
+  ) => MaterialAsset;
+  onRenameMaterial: (materialId: string, name: string) => void;
+  onPushMaterialHistory: () => void;
+  onUpdateMaterial: (
+    materialId: string,
+    patch: Partial<Omit<MaterialAsset, 'id'>>,
+    recordHistory?: boolean,
+  ) => void;
+  onDuplicateMaterial: (
+    materialId: string,
+    assignToSelected?: boolean,
+  ) => MaterialAsset | null;
+  onDeleteMaterial: (materialId: string) => { ok: boolean; error?: string };
+  onAssignMaterialToObjects: (objectIds: string[], materialId: string) => void;
+  onSetObjectShading: (objectId: string, shading: ObjectShadingMode) => void;
   onClose?: () => void;
 }
 
@@ -246,11 +274,22 @@ export const OutlinerPanel: React.FC<OutlinerPanelProps> = ({
   onApplyModifier,
   onRecalculateNormalsOutside,
   onFlipNormals,
+  materials,
+  displayMode,
+  onActivateMaterialPreview,
+  onCreateMaterial,
+  onRenameMaterial,
+  onPushMaterialHistory,
+  onUpdateMaterial,
+  onDuplicateMaterial,
+  onDeleteMaterial,
+  onAssignMaterialToObjects,
+  onSetObjectShading,
   onClose,
 }) => {
-  const [activeTab, setActiveTab] = useState<'hierarchy' | 'modifiers'>(
-    'hierarchy',
-  );
+  const [activeTab, setActiveTab] = useState<
+    'hierarchy' | 'modifiers' | 'materials'
+  >('hierarchy');
   const [expandedScenes, setExpandedScenes] = useState<Record<string, boolean>>(
     () => ({ [activeSceneId]: true }),
   );
@@ -393,11 +432,10 @@ export const OutlinerPanel: React.FC<OutlinerPanelProps> = ({
   const handleNumericTransform = (
     field: 'position' | 'rotation' | 'scale',
     axis: 0 | 1 | 2,
-    raw: string,
+    val: number,
   ) => {
     if (!selectedObj || !activeTransform || selectedObj.locked) return;
-    const val = parseFloat(raw);
-    if (Number.isNaN(val)) return;
+    if (!Number.isFinite(val)) return;
     const next: ObjectTransform = {
       position: [...activeTransform.position],
       rotation: [...activeTransform.rotation],
@@ -811,12 +849,12 @@ export const OutlinerPanel: React.FC<OutlinerPanelProps> = ({
 
   return (
     <aside className="w-64 sm:w-72 shrink-0 bg-[#181a1f] border-l border-[#2b2e36] flex flex-col overflow-hidden z-20 relative">
-      {/* Main Outliner Tabs: Jerarquía | Modificadores */}
+      {/* Main Outliner Tabs: Jerarquía | Modificadores | Materiales */}
       <div className="p-1.5 border-b border-[#2b2e36] bg-[#15171b] shrink-0 flex items-center gap-1.5">
         <div
           role="tablist"
           aria-label="Secciones del panel lateral"
-          className="flex-1 grid grid-cols-2 gap-1 p-0.5 rounded-md bg-[#101216] border border-[#262932]"
+          className="flex-1 grid grid-cols-3 gap-0.5 p-0.5 rounded-md bg-[#101216] border border-[#262932]"
         >
           <button
             id="outliner-tab-hierarchy"
@@ -825,14 +863,14 @@ export const OutlinerPanel: React.FC<OutlinerPanelProps> = ({
             aria-selected={activeTab === 'hierarchy'}
             aria-controls="outliner-tabpanel-hierarchy"
             onClick={() => setActiveTab('hierarchy')}
-            className={`h-8 rounded text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+            className={`h-8 px-1 rounded text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors ${
               activeTab === 'hierarchy'
                 ? 'bg-[#2a2f3a] text-[#5ecd6e]'
                 : 'text-[#9ca3af] hover:text-white'
             }`}
           >
-            <Layers className="w-3.5 h-3.5" />
-            <span>Jerarquía</span>
+            <Layers className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Jerarquía</span>
           </button>
           <button
             id="outliner-tab-modifiers"
@@ -841,14 +879,32 @@ export const OutlinerPanel: React.FC<OutlinerPanelProps> = ({
             aria-selected={activeTab === 'modifiers'}
             aria-controls="outliner-tabpanel-modifiers"
             onClick={() => setActiveTab('modifiers')}
-            className={`h-8 rounded text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+            title="Modificadores"
+            className={`h-8 px-1 rounded text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors ${
               activeTab === 'modifiers'
                 ? 'bg-[#2a2f3a] text-[#5ecd6e]'
                 : 'text-[#9ca3af] hover:text-white'
             }`}
           >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            <span>Modificadores</span>
+            <SlidersHorizontal className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Modif.</span>
+          </button>
+          <button
+            id="outliner-tab-materials"
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'materials'}
+            aria-controls="outliner-tabpanel-materials"
+            onClick={() => setActiveTab('materials')}
+            title="Materiales"
+            className={`h-8 px-1 rounded text-[11px] font-semibold flex items-center justify-center gap-1 transition-colors ${
+              activeTab === 'materials'
+                ? 'bg-[#2a2f3a] text-[#5ecd6e]'
+                : 'text-[#9ca3af] hover:text-white'
+            }`}
+          >
+            <Palette className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Materiales</span>
           </button>
         </div>
 
@@ -887,6 +943,30 @@ export const OutlinerPanel: React.FC<OutlinerPanelProps> = ({
             onApplyModifier={onApplyModifier}
             onRecalculateNormalsOutside={onRecalculateNormalsOutside}
             onFlipNormals={onFlipNormals}
+          />
+        </div>
+      ) : activeTab === 'materials' ? (
+        /* PESTAÑA MATERIALES */
+        <div
+          id="outliner-tabpanel-materials"
+          role="tabpanel"
+          aria-labelledby="outliner-tab-materials"
+          className="flex-1 min-h-0 flex flex-col"
+        >
+          <MaterialPanel
+            materials={materials}
+            selectedObject={selectedObj}
+            selectedObjectIds={selectedObjectIds}
+            objects={objects}
+            displayMode={displayMode}
+            onActivateMaterialPreview={onActivateMaterialPreview}
+            onCreateMaterial={onCreateMaterial}
+            onRenameMaterial={onRenameMaterial}
+            onPushMaterialHistory={onPushMaterialHistory}
+            onUpdateMaterial={onUpdateMaterial}
+            onDuplicateMaterial={onDuplicateMaterial}
+            onDeleteMaterial={onDeleteMaterial}
+            onAssignMaterialToObjects={onAssignMaterialToObjects}
           />
         </div>
       ) : (
@@ -1095,23 +1175,20 @@ export const OutlinerPanel: React.FC<OutlinerPanelProps> = ({
                       return (
                         <label
                           key={axisLabel}
-                          className="flex items-center bg-[#111317] border border-[#2b2e36] rounded px-1.5 h-9"
+                          className="flex items-center bg-[#111317] border border-[#2b2e36] focus-within:border-[#5ecd6e]/60 rounded px-1.5 h-9"
                         >
                           <span
                             className={`text-[11px] font-bold mr-1 ${axisColors[idx]}`}
                           >
                             {axisLabel}
                           </span>
-                          <input
-                            type="number"
-                            step="0.1"
-                            value={Number(editCentroid.centroid![idx].toFixed(3))}
-                            onChange={(e) => {
-                              const v = parseFloat(e.target.value);
-                              if (!Number.isNaN(v)) {
-                                onUpdateEditCentroidAxis(idx as 0 | 1 | 2, v);
-                              }
-                            }}
+                          <NumericFieldInput
+                            ariaLabel={`Centroide ${axisLabel}`}
+                            value={editCentroid.centroid![idx]}
+                            decimals={3}
+                            onCommit={(v) =>
+                              onUpdateEditCentroidAxis(idx as 0 | 1 | 2, v)
+                            }
                             className="w-full bg-transparent text-xs font-mono-tabular text-[#e4e6eb] outline-none text-right"
                           />
                         </label>
@@ -1296,16 +1373,16 @@ export const OutlinerPanel: React.FC<OutlinerPanelProps> = ({
                             >
                               {axisLabel}
                             </span>
-                            <input
-                              type="number"
-                              step={row.step}
+                            <NumericFieldInput
+                              ariaLabel={`${row.label} ${axisLabel}`}
                               disabled={selectedObj.locked}
-                              value={Number(row.values[idx].toFixed(2))}
-                              onChange={(e) =>
+                              value={row.values[idx]}
+                              decimals={2}
+                              onCommit={(val) =>
                                 handleNumericTransform(
                                   row.key,
                                   idx as 0 | 1 | 2,
-                                  e.target.value,
+                                  val,
                                 )
                               }
                               className="w-full bg-transparent text-xs font-mono-tabular text-[#e4e6eb] outline-none text-right disabled:opacity-45"
@@ -1351,7 +1428,7 @@ export const OutlinerPanel: React.FC<OutlinerPanelProps> = ({
               ),
               top: Math.max(
                 12,
-                Math.min(window.innerHeight - 260, contextMenu.y + 4),
+                Math.min(window.innerHeight - 330, contextMenu.y + 4),
               ),
             }}
             className="fixed z-50 w-52 rounded-lg bg-[#1d2027] border border-[#353a46] shadow-2xl py-1 text-xs text-[#e5e7eb]"
@@ -1511,6 +1588,44 @@ export const OutlinerPanel: React.FC<OutlinerPanelProps> = ({
                     <Copy className="w-3.5 h-3.5" />
                     <span>Duplicar</span>
                   </button>
+                  {activeContextObject.objectType === 'mesh' && (
+                    <>
+                      <div className="my-1 border-t border-[#2b2f3a]" />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onSetObjectShading(activeContextObject.id, 'smooth');
+                          setContextMenu(null);
+                        }}
+                        className="w-full h-9 px-3 hover:bg-[#2a2f3a] flex items-center justify-between gap-2 text-left"
+                      >
+                        <span className="flex items-center gap-2">
+                          <Sparkles className="w-3.5 h-3.5 text-[#5ecd6e]" />
+                          <span>Shade Smooth</span>
+                        </span>
+                        {(activeContextObject.shading ?? 'flat') === 'smooth' && (
+                          <Check className="w-3.5 h-3.5 text-[#5ecd6e]" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onSetObjectShading(activeContextObject.id, 'flat');
+                          setContextMenu(null);
+                        }}
+                        className="w-full h-9 px-3 hover:bg-[#2a2f3a] flex items-center justify-between gap-2 text-left"
+                      >
+                        <span className="flex items-center gap-2">
+                          <Box className="w-3.5 h-3.5 text-[#9ca3af]" />
+                          <span>Shade Flat</span>
+                        </span>
+                        {(activeContextObject.shading ?? 'flat') === 'flat' && (
+                          <Check className="w-3.5 h-3.5 text-[#5ecd6e]" />
+                        )}
+                      </button>
+                      <div className="my-1 border-t border-[#2b2f3a]" />
+                    </>
+                  )}
                   {activeContextScene.collections.length > 1 && (
                     <button
                       type="button"

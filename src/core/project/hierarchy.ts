@@ -4,7 +4,10 @@ import { normalizeModifierSlot } from '../modifiers/types';
 import { generateTemplateThumbnailDataUrl } from './thumbnail';
 import {
   CollectionData,
+  MaterialAsset,
+  MaterialSlot,
   ModifierSlot,
+  ObjectShadingMode,
   ObjectTransform,
   ProjectData,
   ProjectTemplateId,
@@ -14,6 +17,230 @@ import {
   SceneData,
   SceneObjectData,
 } from './types';
+
+export const DEFAULT_MATERIAL_COLOR = '#9aa0a6';
+export const DEFAULT_MATERIAL_METALLIC = 0.08;
+export const DEFAULT_MATERIAL_ROUGHNESS = 0.55;
+export const DEFAULT_MATERIAL_NAME = 'Material predeterminado';
+
+export function clampMaterialFactor(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+export function normalizeHexColor(
+  input: unknown,
+  fallback = DEFAULT_MATERIAL_COLOR,
+): string {
+  if (typeof input !== 'string') return fallback;
+  let cleaned = input.trim().toLowerCase();
+  if (!cleaned) return fallback;
+  if (!cleaned.startsWith('#')) cleaned = `#${cleaned}`;
+  if (/^#[0-9a-f]{3}$/.test(cleaned)) {
+    const r = cleaned[1];
+    const g = cleaned[2];
+    const b = cleaned[3];
+    return `#${r}${r}${g}${g}${b}${b}`;
+  }
+  if (/^#[0-9a-f]{6}$/.test(cleaned)) {
+    return cleaned;
+  }
+  return fallback;
+}
+
+export function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const norm = normalizeHexColor(hex, DEFAULT_MATERIAL_COLOR);
+  const intVal = parseInt(norm.slice(1), 16);
+  return {
+    r: (intVal >> 16) & 255,
+    g: (intVal >> 8) & 255,
+    b: intVal & 255,
+  };
+}
+
+export function rgbToHex(r: number, g: number, b: number): string {
+  const clampByte = (v: number) =>
+    Math.max(0, Math.min(255, Math.round(Number.isFinite(v) ? v : 0)));
+  const toHex = (v: number) => clampByte(v).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+export function createMaterialAsset(
+  partial?: Partial<MaterialAsset>,
+  fallbackName = DEFAULT_MATERIAL_NAME,
+): MaterialAsset {
+  const baseColor = normalizeHexColor(partial?.baseColor, DEFAULT_MATERIAL_COLOR);
+  const metallic = clampMaterialFactor(partial?.metallic, DEFAULT_MATERIAL_METALLIC);
+  const roughness = clampMaterialFactor(partial?.roughness, DEFAULT_MATERIAL_ROUGHNESS);
+  const name =
+    typeof partial?.name === 'string' && partial.name.trim()
+      ? partial.name.trim()
+      : fallbackName;
+  const asset: MaterialAsset = {
+    id:
+      typeof partial?.id === 'string' && partial.id.trim()
+        ? partial.id.trim()
+        : createHierarchyId('mat'),
+    name,
+    baseColor,
+    metallic,
+    roughness,
+  };
+  if (typeof partial?.opacity === 'number' && Number.isFinite(partial.opacity)) {
+    asset.opacity = clampMaterialFactor(partial.opacity, 1);
+  }
+  if (typeof partial?.emissiveColor === 'string' && partial.emissiveColor.trim()) {
+    asset.emissiveColor = normalizeHexColor(partial.emissiveColor, '#000000');
+  }
+  if (
+    typeof partial?.emissiveIntensity === 'number' &&
+    Number.isFinite(partial.emissiveIntensity)
+  ) {
+    asset.emissiveIntensity = Math.max(0, partial.emissiveIntensity);
+  }
+  if (typeof partial?.textureName === 'string' && partial.textureName.trim()) {
+    asset.textureName = partial.textureName.trim();
+  }
+  return asset;
+}
+
+export function toMaterialSlot(mat: MaterialAsset): MaterialSlot {
+  return {
+    color: mat.baseColor,
+    roughness: mat.roughness,
+    metalness: mat.metallic,
+  };
+}
+
+export function resolveObjectMaterial(
+  obj: SceneObjectData,
+  materials?: MaterialAsset[],
+): MaterialAsset {
+  if (Array.isArray(materials) && materials.length > 0) {
+    if (obj.materialId) {
+      const found = materials.find((m) => m.id === obj.materialId);
+      if (found) return found;
+    }
+    return materials[0];
+  }
+  return {
+    id: obj.materialId ?? 'mat_default',
+    name: DEFAULT_MATERIAL_NAME,
+    baseColor: normalizeHexColor(obj.material?.color, DEFAULT_MATERIAL_COLOR),
+    metallic: clampMaterialFactor(obj.material?.metalness, DEFAULT_MATERIAL_METALLIC),
+    roughness: clampMaterialFactor(obj.material?.roughness, DEFAULT_MATERIAL_ROUGHNESS),
+  };
+}
+
+function materialsMatchSlot(mat: MaterialAsset, slot?: Partial<MaterialSlot>): boolean {
+  if (!slot) return false;
+  const slotColor = normalizeHexColor(slot.color, DEFAULT_MATERIAL_COLOR);
+  const slotMetal = clampMaterialFactor(slot.metalness, DEFAULT_MATERIAL_METALLIC);
+  const slotRough = clampMaterialFactor(slot.roughness, DEFAULT_MATERIAL_ROUGHNESS);
+  return (
+    mat.baseColor === slotColor &&
+    Math.abs(mat.metallic - slotMetal) < 1e-4 &&
+    Math.abs(mat.roughness - slotRough) < 1e-4
+  );
+}
+
+/**
+ * Ensures `project.materials` is non-empty and valid, migrates legacy per-object
+ * MaterialSlot definitions into shared MaterialAssets, synchronizes every object's
+ * `materialId`, mirrored `material` slot, and `shading` mode.
+ */
+export function syncProjectMaterialsAndObjects(project: ProjectData): ProjectData {
+  const rawMats = Array.isArray(project.materials) ? project.materials : [];
+  const seenIds = new Set<string>();
+  const materials: MaterialAsset[] = [];
+
+  for (const rawMat of rawMats) {
+    if (!rawMat || typeof rawMat !== 'object') continue;
+    const mat = createMaterialAsset(rawMat);
+    if (seenIds.has(mat.id)) {
+      mat.id = createHierarchyId('mat');
+    }
+    seenIds.add(mat.id);
+    materials.push(mat);
+  }
+
+  if (materials.length === 0) {
+    const def = createMaterialAsset(
+      {
+        id: 'mat_default',
+        name: DEFAULT_MATERIAL_NAME,
+        baseColor: DEFAULT_MATERIAL_COLOR,
+        metallic: DEFAULT_MATERIAL_METALLIC,
+        roughness: DEFAULT_MATERIAL_ROUGHNESS,
+      },
+      DEFAULT_MATERIAL_NAME,
+    );
+    seenIds.add(def.id);
+    materials.push(def);
+  }
+
+  const defaultMat = materials[0];
+  const matById = new Map<string, MaterialAsset>(materials.map((m) => [m.id, m]));
+
+  const nextScenes: SceneData[] = project.scenes.map((scene) => ({
+    ...scene,
+    objects: scene.objects.map((obj) => {
+      const shading: ObjectShadingMode = obj.shading === 'smooth' ? 'smooth' : 'flat';
+      if (obj.objectType !== 'mesh') {
+        return {
+          ...obj,
+          shading,
+        };
+      }
+
+      let resolved: MaterialAsset | undefined = obj.materialId
+        ? matById.get(obj.materialId)
+        : undefined;
+
+      if (!resolved) {
+        const legacySlot = obj.material;
+        const matchedExisting = materials.find((m) =>
+          materialsMatchSlot(m, legacySlot),
+        );
+        if (matchedExisting) {
+          resolved = matchedExisting;
+        } else if (
+          legacySlot &&
+          !materialsMatchSlot(defaultMat, legacySlot)
+        ) {
+          const migrated = createMaterialAsset({
+            name: `Material (${obj.name})`,
+            baseColor: legacySlot.color,
+            metallic: legacySlot.metalness,
+            roughness: legacySlot.roughness,
+          });
+          while (matById.has(migrated.id)) {
+            migrated.id = createHierarchyId('mat');
+          }
+          materials.push(migrated);
+          matById.set(migrated.id, migrated);
+          resolved = migrated;
+        } else {
+          resolved = defaultMat;
+        }
+      }
+
+      return {
+        ...obj,
+        materialId: resolved.id,
+        material: toMaterialSlot(resolved),
+        shading,
+      };
+    }),
+  }));
+
+  return {
+    ...project,
+    materials,
+    scenes: nextScenes,
+  };
+}
 
 // Local Vec3 alias compatibility if needed
 type EulerVec3 = [number, number, number];
@@ -202,10 +429,11 @@ export function createDefaultSceneObject(
     },
     mesh: cube.toJSON(),
     material: {
-      color: '#9aa0a6',
-      roughness: 0.55,
-      metalness: 0.08,
+      color: DEFAULT_MATERIAL_COLOR,
+      roughness: DEFAULT_MATERIAL_ROUGHNESS,
+      metalness: DEFAULT_MATERIAL_METALLIC,
     },
+    shading: 'flat',
     modifiers: [],
   };
 }
@@ -242,6 +470,14 @@ export function createProjectFromTemplate(params: {
   const collectionId = baseScene.activeCollectionId;
   const objects: SceneObjectData[] = [];
 
+  const defaultMaterial = createMaterialAsset({
+    id: 'mat_default',
+    name: DEFAULT_MATERIAL_NAME,
+    baseColor: DEFAULT_MATERIAL_COLOR,
+    metallic: DEFAULT_MATERIAL_METALLIC,
+    roughness: DEFAULT_MATERIAL_ROUGHNESS,
+  });
+
   if (params.templateId !== 'empty') {
     const primitiveType = params.templateId;
     const mesh =
@@ -265,11 +501,9 @@ export function createProjectFromTemplate(params: {
         scale: [1, 1, 1],
       },
       mesh: mesh.toJSON(),
-      material: {
-        color: '#9aa0a6',
-        roughness: 0.55,
-        metalness: 0.08,
-      },
+      materialId: defaultMaterial.id,
+      material: toMaterialSlot(defaultMaterial),
+      shading: 'flat',
       modifiers: [],
     });
   }
@@ -292,6 +526,7 @@ export function createProjectFromTemplate(params: {
     thumbnailDataUrl: generateTemplateThumbnailDataUrl(params.templateId),
     thumbnailUpdatedAt: now,
     activeSceneId: scene.id,
+    materials: [defaultMaterial],
     scenes: [scene],
   };
 }
@@ -544,7 +779,7 @@ export function normalizeProjectHierarchy(raw: unknown): ProjectData | null {
       ? candidate.thumbnailUpdatedAt
       : undefined;
 
-  return {
+  const normalizedProject: ProjectData = {
     version: 2,
     coordinateSystem: 'z-up',
     id: baseId,
@@ -557,8 +792,11 @@ export function normalizeProjectHierarchy(raw: unknown): ProjectData | null {
     ...(thumbnailDataUrl ? { thumbnailDataUrl } : {}),
     ...(thumbnailUpdatedAt !== undefined ? { thumbnailUpdatedAt } : {}),
     activeSceneId,
+    materials: Array.isArray(candidate.materials) ? candidate.materials : undefined,
     scenes: normalizedScenes,
   };
+
+  return syncProjectMaterialsAndObjects(normalizedProject);
 }
 
 export function getActiveScene(project: ProjectData): SceneData {

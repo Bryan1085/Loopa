@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Lock } from 'lucide-react';
 import { ViewportDisplayMode } from '../core/project/types';
 
 interface ViewportDisplaySelectorProps {
@@ -35,8 +34,7 @@ export const DISPLAY_MODES: ModeMeta[] = [
   {
     id: 'material',
     label: 'Material Preview',
-    shortDesc: 'Material Preview · Función futura',
-    disabled: true,
+    shortDesc: 'Material Preview · Materiales asignados',
   },
 ];
 
@@ -249,10 +247,6 @@ export const ViewportDisplaySelector: React.FC<ViewportDisplaySelectorProps> = (
       holdTriggeredRef.current = false;
       return;
     }
-    if (mode.disabled) {
-      flashHint('Vista de material · Próximamente', 2200);
-      return;
-    }
     onSelectDisplayMode(mode.id);
     flashHint(mode.shortDesc, 1600);
   };
@@ -272,13 +266,12 @@ export const ViewportDisplaySelector: React.FC<ViewportDisplaySelectorProps> = (
         className="flex items-center gap-1 p-1 rounded-lg bg-[#181a1f]/95 border border-[#2f333d] shadow-lg"
       >
         {DISPLAY_MODES.map((mode) => {
-          const isActive = !mode.disabled && displayMode === mode.id;
+          const isActive = displayMode === mode.id;
           return (
             <button
               key={mode.id}
               type="button"
               aria-pressed={isActive}
-              aria-disabled={mode.disabled ? 'true' : undefined}
               aria-label={mode.shortDesc}
               title={mode.shortDesc}
               onPointerDown={(e) => handlePointerDown(mode, e)}
@@ -296,11 +289,9 @@ export const ViewportDisplaySelector: React.FC<ViewportDisplaySelectorProps> = (
               }}
               onClick={(e) => handleTap(mode, e)}
               className={`relative w-11 h-10 rounded-md border flex items-center justify-center transition-colors touch-manipulation select-none ${
-                mode.disabled
-                  ? 'bg-[#14161b]/80 border-transparent text-[#626977] opacity-65 cursor-not-allowed hover:opacity-80'
-                  : isActive
-                    ? 'bg-[#2c313b] border-[#5ecd6e]/75 text-[#5ecd6e] shadow-inner'
-                    : 'bg-transparent border-transparent text-[#b4bac4] hover:text-white hover:bg-[#242832]'
+                isActive
+                  ? 'bg-[#2c313b] border-[#5ecd6e]/75 text-[#5ecd6e] shadow-inner'
+                  : 'bg-transparent border-transparent text-[#b4bac4] hover:text-white hover:bg-[#242832]'
               }`}
             >
               <ShadingModeIcon mode={mode.id} active={isActive} />
@@ -311,16 +302,6 @@ export const ViewportDisplaySelector: React.FC<ViewportDisplaySelectorProps> = (
                   aria-hidden="true"
                   className="absolute bottom-1 left-2.5 right-2.5 h-0.5 rounded-full bg-[#5ecd6e]"
                 />
-              )}
-
-              {/* Future-feature subtle lock indicator on Material Preview */}
-              {mode.disabled && (
-                <span
-                  aria-hidden="true"
-                  className="absolute top-1 right-1 w-3.5 h-3.5 rounded-full bg-[#1e222b] border border-[#3a404e] flex items-center justify-center"
-                >
-                  <Lock className="w-2 h-2 text-[#8e95a2]" />
-                </span>
               )}
             </button>
           );

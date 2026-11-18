@@ -11,16 +11,26 @@ import {
   yieldToMainThread,
 } from './meshUtils';
 
+export interface ImportedMaterialInfo {
+  key: string;
+  name: string;
+  baseColor: string;
+  metallic: number;
+  roughness: number;
+}
+
 export interface ImportedMeshPart {
   name: string;
   mesh: EditableMesh;
   material: MaterialSlot;
+  materialInfo?: ImportedMaterialInfo;
   groupName?: string;
 }
 
 export interface ObjImportResult {
   baseName: string;
   parts: ImportedMeshPart[];
+  materials?: ImportedMaterialInfo[];
   warnings: string[];
   hadNormals: boolean;
   hadUvs: boolean;
@@ -43,23 +53,109 @@ function resolveObjIndex(raw: number, length: number): number | null {
   return idx >= 0 && idx < length ? idx : null;
 }
 
-function extractMaterialSlotFromMtl(
+interface RawMtlExtras {
+  baseColor?: string;
+  metallic?: number;
+  roughness?: number;
+}
+
+function parseMtlPbrExtras(mtlText: string): Map<string, RawMtlExtras> {
+  const result = new Map<string, RawMtlExtras>();
+  let currentName = '';
+  const lines = mtlText.split(/\r?\n/);
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const parts = line.split(/\s+/);
+    const cmd = parts[0];
+    if (cmd === 'newmtl' && parts.length >= 2) {
+      currentName = parts.slice(1).join(' ').trim();
+      if (currentName && !result.has(currentName)) {
+        result.set(currentName, {});
+      }
+      continue;
+    }
+    if (!currentName) continue;
+    const entry = result.get(currentName)!;
+    if (cmd === 'Kd' && parts.length >= 4) {
+      const r = Number(parts[1]);
+      const g = Number(parts[2]);
+      const b = Number(parts[3]);
+      if (Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)) {
+        const c = new THREE.Color(
+          Math.max(0, Math.min(1, r)),
+          Math.max(0, Math.min(1, g)),
+          Math.max(0, Math.min(1, b)),
+        );
+        entry.baseColor = `#${c.getHexString()}`;
+      }
+    } else if (cmd === 'Pm' && parts.length >= 2) {
+      const pm = Number(parts[1]);
+      if (Number.isFinite(pm)) {
+        entry.metallic = Math.max(0, Math.min(1, pm));
+      }
+    } else if (cmd === 'Pr' && parts.length >= 2) {
+      const pr = Number(parts[1]);
+      if (Number.isFinite(pr)) {
+        entry.roughness = Math.max(0, Math.min(1, pr));
+      }
+    } else if (cmd === 'Ns' && parts.length >= 2 && entry.roughness === undefined) {
+      const ns = Number(parts[1]);
+      if (Number.isFinite(ns) && ns >= 0) {
+        // Approximate Blender Phong shininess -> PBR roughness
+        entry.roughness = Math.max(
+          0.08,
+          Math.min(0.95, 1 - Math.sqrt(Math.min(1000, ns)) / Math.sqrt(1000)),
+        );
+      }
+    }
+  }
+  return result;
+}
+
+function extractMaterialFromMtl(
   materialsMap: Map<string, THREE.Material>,
+  mtlExtras: Map<string, RawMtlExtras>,
   matName: string,
-): MaterialSlot {
+): { slot: MaterialSlot; info?: ImportedMaterialInfo } {
   const mat = matName ? materialsMap.get(matName) : undefined;
+  const extras = matName ? mtlExtras.get(matName) : undefined;
+
+  let baseColor = extras?.baseColor ?? '#9aa0a6';
+  let metallic = extras?.metallic ?? 0.08;
+  let roughness = extras?.roughness ?? 0.55;
+
   if (mat && 'color' in mat && mat.color instanceof THREE.Color) {
+    baseColor = extras?.baseColor ?? `#${mat.color.getHexString()}`;
+  }
+  if (mat && 'metalness' in mat && typeof mat.metalness === 'number') {
+    metallic = Math.max(0, Math.min(1, mat.metalness));
+  }
+  if (mat && 'roughness' in mat && typeof mat.roughness === 'number') {
+    roughness = Math.max(0, Math.min(1, mat.roughness));
+  }
+
+  const slot: MaterialSlot = {
+    color: baseColor,
+    roughness,
+    metalness: metallic,
+  };
+
+  if (matName && (mat || extras)) {
     return {
-      color: `#${mat.color.getHexString()}`,
-      roughness: 0.55,
-      metalness: 0.08,
+      slot,
+      info: {
+        key: matName,
+        name: matName,
+        baseColor,
+        metallic,
+        roughness,
+      },
     };
   }
-  return {
-    color: '#9aa0a6',
-    roughness: 0.55,
-    metalness: 0.08,
-  };
+
+  return { slot };
 }
 
 export async function parseObjContent(
@@ -87,6 +183,10 @@ export async function parseObjContent(
 
   // Optional MTL material parsing using Three.js MTLLoader
   const materialsMap = new Map<string, THREE.Material>();
+  const mtlExtras =
+    options.mtlText && options.mtlText.trim()
+      ? parseMtlPbrExtras(options.mtlText)
+      : new Map<string, RawMtlExtras>();
   let usedMtl = false;
   let mtlCreator: ReturnType<MTLLoader['parse']> | null = null;
   if (options.mtlText && options.mtlText.trim()) {
@@ -97,7 +197,7 @@ export async function parseObjContent(
       for (const [k, m] of Object.entries(mtlCreator.materials)) {
         materialsMap.set(k, m);
       }
-      usedMtl = materialsMap.size > 0;
+      usedMtl = materialsMap.size > 0 || mtlExtras.size > 0;
     } catch {
       warnings.push(
         'No se pudo interpretar el archivo MTL adjunto; se usará el material predeterminado.',
@@ -417,10 +517,17 @@ export async function parseObjContent(
     }
     usedNames.add(candidateName);
 
+    const extractedMat = extractMaterialFromMtl(
+      materialsMap,
+      mtlExtras,
+      grp.materialName,
+    );
+
     importedParts.push({
       name: candidateName,
       mesh: editable,
-      material: extractMaterialSlotFromMtl(materialsMap, grp.materialName),
+      material: extractedMat.slot,
+      materialInfo: extractedMat.info,
       groupName: grp.name,
     });
   }
@@ -429,11 +536,19 @@ export async function parseObjContent(
     throw new Error('No se encontraron caras válidas en el archivo OBJ.');
   }
 
+  const collectedMaterialsMap = new Map<string, ImportedMaterialInfo>();
+  for (const part of importedParts) {
+    if (part.materialInfo && !collectedMaterialsMap.has(part.materialInfo.key)) {
+      collectedMaterialsMap.set(part.materialInfo.key, part.materialInfo);
+    }
+  }
+
   options.onProgress?.(1, 'OBJ importado correctamente');
 
   return {
     baseName,
     parts: importedParts,
+    materials: Array.from(collectedMaterialsMap.values()),
     warnings,
     hadNormals: globalNormals.length > 0,
     hadUvs: globalUvs.length > 0,
