@@ -84,9 +84,14 @@ import {
   mergeVerticesMesh,
   MergeParams,
   resolveEdgeLoopSelection,
+  resolveExtrudeTarget,
   subdivideMesh,
   SubdivideParams,
 } from '../core/mesh/advancedOperations';
+import {
+  findShortestComponentPath,
+  meshHasComponent,
+} from '../core/mesh/shortestPathSelect';
 import { connectVertexPathMesh } from '../core/mesh/connectVertexPath';
 import { flipNormalsMesh, recalculateOutsideMesh } from '../core/mesh/normals';
 import {
@@ -431,6 +436,20 @@ export function useModelerStore() {
   const savedEditSelectionsRef = useRef<
     Map<string, { mode: EditSelectionMode; ids: string[] }>
   >(new Map());
+  const selectionAnchorRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (
+      !selectionAnchorRef.current ||
+      !selectedComponentIds.has(selectionAnchorRef.current)
+    ) {
+      let last: string | null = null;
+      for (const id of selectedComponentIds) {
+        last = id;
+      }
+      selectionAnchorRef.current = last;
+    }
+  }, [selectedComponentIds, selectedObjectId, editSelectionMode]);
 
   const saveCurrentEditSelection = useCallback(() => {
     if (workMode !== 'edit' || !selectedObjectId) return;
@@ -2520,9 +2539,69 @@ export function useModelerStore() {
   }, [toggleScreenModifier]);
 
   const selectComponentFromViewport = useCallback(
-    (id: string | null, additive: boolean, addOnly = false) => {
+    (id: string | null, additive: boolean, addOnly = false, ctrl = false) => {
       if (operatorSession) return;
       const effectiveAdditive = additive || screenShiftActive;
+
+      // Ctrl + Tap in Edit Mode -> Blender-like shortest topological path selection
+      if (ctrl && workMode === 'edit' && selectedObject) {
+        if (id === null) {
+          return;
+        }
+        const mesh = EditableMesh.fromJSON(selectedObject.mesh);
+        if (!meshHasComponent(mesh, editSelectionMode, id)) {
+          return;
+        }
+
+        let startId: string | null =
+          selectionAnchorRef.current &&
+          selectedComponentIds.has(selectionAnchorRef.current) &&
+          meshHasComponent(mesh, editSelectionMode, selectionAnchorRef.current)
+            ? selectionAnchorRef.current
+            : null;
+
+        if (!startId) {
+          for (const selId of selectedComponentIds) {
+            if (meshHasComponent(mesh, editSelectionMode, selId)) {
+              startId = selId;
+            }
+          }
+        }
+
+        if (!startId) {
+          const next = effectiveAdditive
+            ? new Set(selectedComponentIds)
+            : new Set<string>();
+          next.add(id);
+          selectionAnchorRef.current = id;
+          setSelectedComponentIds(next);
+          return;
+        }
+
+        const pathRes = findShortestComponentPath(
+          mesh,
+          editSelectionMode,
+          startId,
+          id,
+        );
+        if (!pathRes.connected || pathRes.ids.length === 0) {
+          showToast(
+            'Los elementos no están conectados en la topología de la malla',
+          );
+          return;
+        }
+
+        const next = effectiveAdditive
+          ? new Set(selectedComponentIds)
+          : new Set<string>();
+        for (const pid of pathRes.ids) {
+          next.add(pid);
+        }
+        selectionAnchorRef.current = id;
+        setSelectedComponentIds(next);
+        return;
+      }
+
       if (
         workMode === 'edit' &&
         editSelectionMode === 'edge' &&
@@ -2551,24 +2630,40 @@ export function useModelerStore() {
             } else {
               for (const eid of loopRes.edgeIds) next.add(eid);
             }
+            if (next.has(id)) selectionAnchorRef.current = id;
             return next;
           }
           if (allAlreadySelected && prev.size === loopRes.edgeIds.length) {
+            selectionAnchorRef.current = null;
             return new Set();
           }
+          selectionAnchorRef.current = id;
           return new Set(loopRes.edgeIds);
         });
         return;
       }
-      setSelectedComponentIds((prev) =>
-        applyComponentSelection(prev, id, effectiveAdditive, addOnly),
-      );
+
+      setSelectedComponentIds((prev) => {
+        const next = applyComponentSelection(
+          prev,
+          id,
+          effectiveAdditive,
+          addOnly,
+        );
+        if (id !== null && next.has(id)) {
+          selectionAnchorRef.current = id;
+        } else if (next.size === 0) {
+          selectionAnchorRef.current = null;
+        }
+        return next;
+      });
     },
     [
       edgeSelectionTool,
       editSelectionMode,
       operatorSession,
       screenShiftActive,
+      selectedComponentIds,
       selectedObject,
       showToast,
       workMode,
@@ -3716,6 +3811,7 @@ export function useModelerStore() {
         previewMesh: null as SerializedEditableMesh | null,
         previewSelectedIds: null as Set<string> | null,
         previewNextMode: null as EditSelectionMode | null,
+        effectiveOperatorMode: null as EditSelectionMode | null,
         loopCutSegments: [] as [Vec3, Vec3][],
         loopCutRingEdgeIds: [] as string[],
         loopCutFaceIds: [] as string[],
@@ -3738,6 +3834,7 @@ export function useModelerStore() {
           previewMesh: null,
           previewSelectedIds: null,
           previewNextMode: null,
+          effectiveOperatorMode: 'edge' as EditSelectionMode,
           loopCutSegments: [] as [Vec3, Vec3][],
           loopCutRingEdgeIds: [] as string[],
           loopCutFaceIds: [] as string[],
@@ -3754,6 +3851,7 @@ export function useModelerStore() {
           previewMesh: null,
           previewSelectedIds: null,
           previewNextMode: null,
+          effectiveOperatorMode: 'edge' as EditSelectionMode,
           loopCutSegments: [] as [Vec3, Vec3][],
           loopCutRingEdgeIds: [] as string[],
           loopCutFaceIds: [] as string[],
@@ -3777,6 +3875,7 @@ export function useModelerStore() {
         previewMesh: null,
         previewSelectedIds: null,
         previewNextMode: null,
+        effectiveOperatorMode: 'edge' as EditSelectionMode,
         loopCutSegments: segments,
         loopCutRingEdgeIds: analysis.ring.edgeIds,
         loopCutFaceIds: analysis.ring.faceIds,
@@ -3794,6 +3893,7 @@ export function useModelerStore() {
         previewMesh: mergeRes.mesh.toJSON(),
         previewSelectedIds: mergeRes.nextSelectedIds,
         previewNextMode: null,
+        effectiveOperatorMode: null,
         loopCutSegments: [] as [Vec3, Vec3][],
         loopCutRingEdgeIds: [] as string[],
         loopCutFaceIds: [] as string[],
@@ -3811,6 +3911,7 @@ export function useModelerStore() {
         previewMesh: ldRes.error ? null : ldRes.result.mesh.toJSON(),
         previewSelectedIds: ldRes.error ? null : ldRes.result.nextSelectedIds,
         previewNextMode: null,
+        effectiveOperatorMode: null,
         loopCutSegments: [] as [Vec3, Vec3][],
         loopCutRingEdgeIds: [] as string[],
         loopCutFaceIds: [] as string[],
@@ -3828,6 +3929,7 @@ export function useModelerStore() {
         previewMesh: brRes.error ? null : brRes.result.mesh.toJSON(),
         previewSelectedIds: brRes.error ? null : brRes.result.nextSelectedIds,
         previewNextMode: brRes.nextMode ?? null,
+        effectiveOperatorMode: brRes.nextMode ?? null,
         loopCutSegments: [] as [Vec3, Vec3][],
         loopCutRingEdgeIds: [] as string[],
         loopCutFaceIds: [] as string[],
@@ -3845,6 +3947,7 @@ export function useModelerStore() {
         previewMesh: mRes.mesh.toJSON(),
         previewSelectedIds: mRes.nextSelectedIds,
         previewNextMode: mRes.nextMode ?? null,
+        effectiveOperatorMode: mRes.nextMode ?? null,
         loopCutSegments: [] as [Vec3, Vec3][],
         loopCutRingEdgeIds: [] as string[],
         loopCutFaceIds: [] as string[],
@@ -3857,12 +3960,16 @@ export function useModelerStore() {
     }
 
     let res;
+    let effectiveOperatorMode: EditSelectionMode | null = null;
     if (cfg.type === 'extrude') {
+      const resolvedExtrude = resolveExtrudeTarget(baseMesh, mode, baseSel);
+      effectiveOperatorMode = resolvedExtrude.mode;
       if (Math.abs(cfg.params.distance) < 1e-8) {
         return {
           previewMesh: null,
           previewSelectedIds: null,
           previewNextMode: null,
+          effectiveOperatorMode,
           loopCutSegments: [] as [Vec3, Vec3][],
           loopCutRingEdgeIds: [] as string[],
           loopCutFaceIds: [] as string[],
@@ -3873,7 +3980,28 @@ export function useModelerStore() {
           mergedCount: 0,
         };
       }
-      res = extrudeMesh(baseMesh, mode, baseSel, cfg.params);
+      res = extrudeMesh(
+        baseMesh,
+        resolvedExtrude.mode,
+        resolvedExtrude.targetIds,
+        cfg.params,
+      );
+      if (resolvedExtrude.mode !== mode) {
+        const mapped = computeDerivedEditSelection(
+          res.mesh,
+          resolvedExtrude.mode,
+          res.nextSelectedIds,
+        );
+        res = {
+          mesh: res.mesh,
+          nextSelectedIds:
+            mode === 'vertex'
+              ? new Set(mapped.vertexIds)
+              : mode === 'edge'
+                ? new Set(mapped.edgeIds)
+                : new Set(mapped.faceIds),
+        };
+      }
     } else if (cfg.type === 'inset') {
       res = insetFacesMesh(baseMesh, mode, baseSel, cfg.params);
     } else if (cfg.type === 'subdivide') {
@@ -3886,6 +4014,7 @@ export function useModelerStore() {
       previewMesh: res.mesh.toJSON(),
       previewSelectedIds: res.nextSelectedIds,
       previewNextMode: null,
+      effectiveOperatorMode,
       loopCutSegments: [] as [Vec3, Vec3][],
       loopCutRingEdgeIds: [] as string[],
       loopCutFaceIds: [] as string[],
@@ -4726,6 +4855,7 @@ export function useModelerStore() {
     operatorMergedCount: operatorPreview.mergedCount,
     operatorError: operatorPreview.operatorError,
     operatorStatusMessage: operatorPreview.operatorStatusMessage,
+    operatorEffectiveMode: operatorPreview.effectiveOperatorMode,
     loopCutPreviewSegments: operatorPreview.loopCutSegments,
     loopCutRingEdgeIds: operatorPreview.loopCutRingEdgeIds,
     loopCutFaceIds: operatorPreview.loopCutFaceIds,

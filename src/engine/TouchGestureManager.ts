@@ -149,7 +149,9 @@ interface ArmedTrackballState {
   startY: number;
   currX: number;
   currY: number;
+  downTime: number;
   activeDrag: boolean;
+  canRotate: boolean;
 }
 
 interface ArmedModalDragState {
@@ -567,7 +569,7 @@ export class TouchGestureManager {
         return;
       }
 
-      // CTRL + drag -> virtual trackball rotation (blocks orbit immediately when armed)
+      // CTRL + drag -> virtual trackball rotation; static CTRL + tap -> path selection
       if (effMods.ctrl && !effMods.shift && !effMods.alt && isValidButton) {
         this.lastTap = null;
         this.clearLongPressTimer();
@@ -575,26 +577,22 @@ export class TouchGestureManager {
         const canTrackball =
           !this.callbacks.isTrackballDisabled?.() &&
           (this.callbacks.canTrackballRotate?.() ?? true);
-        if (canTrackball) {
-          this.trackballState = {
-            pointerId: e.pointerId,
-            pointerType: e.pointerType,
-            startX: e.clientX,
-            startY: e.clientY,
-            currX: e.clientX,
-            currY: e.clientY,
-            activeDrag: false,
-          };
-          try {
-            this.element.setPointerCapture(e.pointerId);
-          } catch {
-            // Ignore capture error on detached/synthetic events
-          }
-          this.callbacks.onTouchNavigationChange(this.pointers, effMods, true);
-          return;
+        this.trackballState = {
+          pointerId: e.pointerId,
+          pointerType: e.pointerType,
+          startX: e.clientX,
+          startY: e.clientY,
+          currX: e.clientX,
+          currY: e.clientY,
+          downTime: now,
+          activeDrag: false,
+          canRotate: canTrackball,
+        };
+        try {
+          this.element.setPointerCapture(e.pointerId);
+        } catch {
+          // Ignore capture error on detached/synthetic events
         }
-        // Static/non-rotatable CTRL touch should not trigger accidental selection or long press
-        this.episodeInvalidated = true;
         this.callbacks.onTouchNavigationChange(this.pointers, effMods, true);
         return;
       }
@@ -867,7 +865,10 @@ export class TouchGestureManager {
         this.maxMoveDist = dist;
       }
       if (!this.trackballState.activeDrag) {
-        if (dist >= TRACKBALL_DRAG_THRESHOLD_PX) {
+        if (
+          this.trackballState.canRotate &&
+          dist >= TRACKBALL_DRAG_THRESHOLD_PX
+        ) {
           this.trackballState.activeDrag = true;
           this.callbacks.onTrackballRotateStart?.(
             this.trackballState.startX,
@@ -992,17 +993,46 @@ export class TouchGestureManager {
       return;
     }
 
-    // Handle CTRL + drag Virtual Trackball release
+    // Handle CTRL + drag Virtual Trackball release OR static CTRL + tap path selection
     if (this.trackballState && this.trackballState.pointerId === e.pointerId) {
       const state = this.trackballState;
+      state.currX = e.clientX;
+      state.currY = e.clientY;
       this.trackballState = null;
       this.releaseCaptureSafely(e.pointerId);
       this.pointers.delete(e.pointerId);
 
+      const modifiers = this.getEffectiveModifiers(e);
+      const dt = performance.now() - state.downTime;
+      const moved = Math.hypot(
+        state.currX - state.startX,
+        state.currY - state.startY,
+      );
+
       if (state.activeDrag) {
         this.callbacks.onTrackballRotateEnd?.();
+      } else {
+        const moveLimit =
+          state.pointerType === 'touch'
+            ? SINGLE_TAP_MOVE_TOUCH_PX
+            : SINGLE_TAP_MOVE_MOUSE_PX;
+        const tapEnabled =
+          state.pointerType !== 'touch' || this.config.oneFingerTapSelect;
+        if (
+          tapEnabled &&
+          !this.callbacks.isGizmoBusy() &&
+          moved <= moveLimit &&
+          dt <= SINGLE_TAP_MAX_MS
+        ) {
+          this.callbacks.onSingleTap(
+            e.clientX,
+            e.clientY,
+            state.pointerType,
+            { ...modifiers, ctrl: true },
+            e.shiftKey,
+          );
+        }
       }
-      // Static CTRL tap intentionally performs no rotation and no accidental deselection
       this.lastTap = null;
       this.resetEpisode();
       this.callbacks.onTouchNavigationChange(
@@ -1181,8 +1211,8 @@ export class TouchGestureManager {
               tapEnabled &&
               this.maxMoveDist <= moveLimit &&
               dt <= SINGLE_TAP_MAX_MS &&
-              !effMods.ctrl &&
-              !effMods.alt
+              !effMods.alt &&
+              (!effMods.ctrl || effMods.shift)
             ) {
               this.episodeInvalidated = true;
               // Record tap for potential Double-Tap + Hold & Drag on next rapid press

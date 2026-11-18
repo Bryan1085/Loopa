@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { ExtrudeAxis, MergeMode } from '../core/mesh/advancedOperations';
 import { Vec3 } from '../core/mesh/EditableMesh';
+import { EditSelectionMode } from '../core/mesh/operations';
 import {
   EditOperatorParams,
   EditOperatorSession,
@@ -24,6 +25,7 @@ import {
 
 interface EditOperatorBarProps {
   session: EditOperatorSession;
+  effectiveSelectionMode?: EditSelectionMode | null;
   mergedCount?: number;
   operatorError?: string | null;
   operatorStatusMessage?: string | null;
@@ -82,6 +84,7 @@ const OPERATOR_META: Record<
 
 export const EditOperatorBar: React.FC<EditOperatorBarProps> = ({
   session,
+  effectiveSelectionMode = null,
   mergedCount = 0,
   operatorError = null,
   operatorStatusMessage = null,
@@ -344,7 +347,7 @@ export const EditOperatorBar: React.FC<EditOperatorBarProps> = ({
               ))}
             </div>
 
-            {baseSelectionMode === 'face' && (
+            {(effectiveSelectionMode ?? baseSelectionMode) === 'face' && (
               <button
                 type="button"
                 onClick={() =>

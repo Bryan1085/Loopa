@@ -93,6 +93,7 @@ export default function App() {
   const jpgInputRef = useRef<HTMLInputElement | null>(null);
   const pngInputRef = useRef<HTMLInputElement | null>(null);
   const nativeProjectInputRef = useRef<HTMLInputElement | null>(null);
+  const lastGKeyTimeRef = useRef<number>(0);
 
   useEffect(() => {
     store.registerThumbnailProvider(
@@ -592,7 +593,23 @@ export default function App() {
           }
           break;
         case 'g':
-          if (!ctrlHeld && !altHeld) store.triggerGQuickTapMove();
+          if (!ctrlHeld && !altHeld && !e.repeat) {
+            const now = performance.now();
+            const isSecondG =
+              store.modalTransform?.mode === 'move' ||
+              now - lastGKeyTimeRef.current <= 450;
+            lastGKeyTimeRef.current = now;
+            if (
+              isSecondG &&
+              store.workMode === 'edit' &&
+              (store.editSelectionMode === 'vertex' ||
+                store.editSelectionMode === 'edge')
+            ) {
+              store.triggerGHoldSlide();
+            } else {
+              store.triggerGQuickTapMove();
+            }
+          }
           break;
         case 'r':
           if (!ctrlHeld && !altHeld) store.setActiveTool('rotate');
@@ -982,6 +999,7 @@ export default function App() {
           operatorMergedCount={store.operatorMergedCount}
           operatorError={store.operatorError}
           operatorStatusMessage={store.operatorStatusMessage}
+          operatorEffectiveMode={store.operatorEffectiveMode}
           loopCutPreviewSegments={store.loopCutPreviewSegments}
           loopCutRingEdgeIds={store.loopCutRingEdgeIds}
           loopCutFaceIds={store.loopCutFaceIds}

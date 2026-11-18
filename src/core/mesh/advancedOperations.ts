@@ -7,6 +7,7 @@ import {
   Vec3,
 } from './EditableMesh';
 import {
+  computeDerivedEditSelection,
   EditSelectionMode,
   MeshOperatorContext,
   MeshOperatorResult,
@@ -53,16 +54,20 @@ import {
 
 import {
   applyEdgeSlide,
+  applyParametricVertexSlide,
   applyVertexSlideAlongDirection,
   applyVertexSlideFromScreenSelections,
   buildEdgeSlidePlan,
+  buildParametricVertexSlidePlan,
   buildVertexSlidePlan,
   EdgeSlidePlan,
   EdgeSlideRail,
+  ParametricVertexSlidePlan,
   SlideApplyResult,
   SlideMode,
   VertexRailOption,
   VertexSlidePlan,
+  VertexSlideRailPair,
   VertexSlideSelection,
 } from './slideTools';
 
@@ -83,20 +88,24 @@ export type {
   LoopCutBlockReason,
   LoopCutExecutionResult,
   LoopCutParams,
+  ParametricVertexSlidePlan,
   SlideApplyResult,
   SlideMode,
   VertexRailOption,
   VertexSlidePlan,
+  VertexSlideRailPair,
   VertexSlideSelection,
 };
 export {
   analyzeBridgeEdgeLoops,
   analyzeEdgeLoopRing,
   applyEdgeSlide,
+  applyParametricVertexSlide,
   applyVertexSlideAlongDirection,
   applyVertexSlideFromScreenSelections,
   bridgeEdgeLoopsMesh,
   buildEdgeSlidePlan,
+  buildParametricVertexSlidePlan,
   buildVertexSlidePlan,
   computeLoopCutFractions,
   computeLoopCutPreviewSegments,
@@ -223,6 +232,50 @@ function deterministicJitter(id: string): number {
   return ((h >>> 0) % 1000) / 500 - 1; // [-1, 1]
 }
 
+export interface ResolvedExtrudeTarget {
+  mode: EditSelectionMode;
+  targetIds: Set<string>;
+}
+
+/**
+ * Detects the actual geometry element type to extrude (face > edge > vertex)
+ * from the selected IDs and active selection mode, separating the active UI mode
+ * from the effective extrusion target and avoiding mixed extrusion types.
+ */
+export function resolveExtrudeTarget(
+  mesh: EditableMesh,
+  activeMode: EditSelectionMode,
+  selectedIds: ReadonlySet<string>,
+): ResolvedExtrudeTarget {
+  const directFaces = new Set<string>();
+  const directEdges = new Set<string>();
+  const directVerts = new Set<string>();
+
+  for (const id of selectedIds) {
+    if (mesh.getFace(id)) directFaces.add(id);
+    else if (mesh.getEdge(id)) directEdges.add(id);
+    else if (mesh.getVertex(id)) directVerts.add(id);
+  }
+
+  const derived = computeDerivedEditSelection(mesh, activeMode, selectedIds);
+
+  if (directFaces.size > 0 || derived.faceIds.size > 0) {
+    const faceIds = new Set<string>(directFaces);
+    for (const fid of derived.faceIds) faceIds.add(fid);
+    return { mode: 'face', targetIds: faceIds };
+  }
+
+  if (directEdges.size > 0 || derived.edgeIds.size > 0) {
+    const edgeIds = new Set<string>(directEdges);
+    for (const eid of derived.edgeIds) edgeIds.add(eid);
+    return { mode: 'edge', targetIds: edgeIds };
+  }
+
+  const vertIds = new Set<string>(directVerts);
+  for (const vid of derived.vertexIds) vertIds.add(vid);
+  return { mode: 'vertex', targetIds: vertIds };
+}
+
 /* ============================================================================
  * A. EXTRUDE — EXTRUSIÓN (Caras, Aristas, Vértices)
  * ========================================================================== */
@@ -240,12 +293,20 @@ export function extrudeMesh(
     return { mesh, nextSelectedIds: nextSelected };
   }
 
+  const resolved = resolveExtrudeTarget(mesh, mode, selectedIds);
+  const effMode = resolved.mode;
+  const effSelectedIds = resolved.targetIds;
+
+  if (effSelectedIds.size === 0) {
+    return { mesh, nextSelectedIds: nextSelected };
+  }
+
   if (!Number.isFinite(distance) || Math.abs(distance) < 1e-8) {
-    for (const id of selectedIds) {
+    for (const id of effSelectedIds) {
       if (
-        (mode === 'vertex' && mesh.getVertex(id)) ||
-        (mode === 'edge' && mesh.getEdge(id)) ||
-        (mode === 'face' && mesh.getFace(id))
+        (effMode === 'vertex' && mesh.getVertex(id)) ||
+        (effMode === 'edge' && mesh.getEdge(id)) ||
+        (effMode === 'face' && mesh.getFace(id))
       ) {
         nextSelected.add(id);
       }
@@ -253,8 +314,8 @@ export function extrudeMesh(
     return { mesh, nextSelectedIds: nextSelected };
   }
 
-  if (mode === 'vertex') {
-    for (const vid of selectedIds) {
+  if (effMode === 'vertex') {
+    for (const vid of effSelectedIds) {
       const v = mesh.getVertex(vid);
       if (!v) continue;
       const dir =
@@ -267,8 +328,8 @@ export function extrudeMesh(
     return { mesh, nextSelectedIds: nextSelected };
   }
 
-  if (mode === 'edge') {
-    const validEdges = Array.from(selectedIds)
+  if (effMode === 'edge') {
+    const validEdges = Array.from(effSelectedIds)
       .map((id) => mesh.getEdge(id))
       .filter((e): e is NonNullable<typeof e> => Boolean(e));
     if (validEdges.length === 0) return { mesh, nextSelectedIds: nextSelected };
@@ -324,7 +385,7 @@ export function extrudeMesh(
   }
 
   // FACE MODE
-  const selectedFaces = Array.from(selectedIds)
+  const selectedFaces = Array.from(effSelectedIds)
     .map((id) => mesh.getFace(id))
     .filter((f): f is MeshFace => Boolean(f));
   if (selectedFaces.length === 0) return { mesh, nextSelectedIds: nextSelected };

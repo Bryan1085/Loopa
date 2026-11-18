@@ -52,7 +52,7 @@ import {
 } from '../config/brand';
 import type { ToolResetTarget } from '../state/useModelerStore';
 import { LoopaFullLogo } from './BrandLogo';
-import { ProportionalIcon } from './ProportionalEditingBar';
+import { ProportionalIcon } from './ProportionalIcons';
 import { RadialActionIcon } from './RadialActionIcon';
 import { RadialSlotEditorModal } from './RadialSlotEditorModal';
 import type { SceneStatsInfo } from './TopBar';

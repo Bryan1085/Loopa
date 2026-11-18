@@ -25,12 +25,14 @@ import {
 } from '../core/mesh/proportionalEditing';
 import {
   applyEdgeSlide,
-  applyVertexSlideFromScreenSelections,
+  applyParametricVertexSlide,
   buildEdgeSlidePlan,
+  buildParametricVertexSlidePlan,
   buildVertexSlidePlan,
   EdgeSlidePlan,
+  ParametricVertexSlidePlan,
   VertexSlidePlan,
-  VertexSlideSelection,
+  VertexSlideRailPair,
 } from '../core/mesh/slideTools';
 import { encodeProjectThumbnailFromCanvas } from '../core/project/thumbnail';
 import {
@@ -139,6 +141,7 @@ export interface ViewportCallbacks {
     id: string | null,
     additive: boolean,
     addOnly?: boolean,
+    ctrl?: boolean,
   ) => void;
   onBoxSelectComponents?: (ids: string[], additive: boolean) => void;
   onBoxSelectOverlayChange?: (overlay: BoxSelectOverlayState | null) => void;
@@ -358,7 +361,11 @@ export class ViewportEngine {
   private modalSlideClamp = true;
   private modalCancelNonce = 0;
   private slideSessionBaseMesh: EditableMesh | null = null;
+  private slideSessionFactor = 0;
+  private modalSlideStartFactor = 0;
+  private lastAppliedSlideFactor = 0;
   private slideSessionHasChanges = false;
+  private slideSessionVertexSlidePlan: ParametricVertexSlidePlan | null = null;
   private cameraRotationLocked = false;
   private isModalDragging = false;
   private modalMoved = false;
@@ -370,8 +377,10 @@ export class ViewportEngine {
   private modalAxisDirWorld = new THREE.Vector3();
   private modalLastDeltaWorld = new THREE.Vector3();
   private modalVertexSlidePlan: VertexSlidePlan | null = null;
+  private modalParametricVertexSlidePlan: ParametricVertexSlidePlan | null = null;
+  private modalVertexSlideAxisLocked = false;
   private modalEdgeSlidePlan: EdgeSlidePlan | null = null;
-  private modalEdgeSlideAxis2D: {
+  private modalSlideAxis2D: {
     dirX: number;
     dirY: number;
     lenPosPx: number;
@@ -786,12 +795,14 @@ export class ViewportEngine {
         const shiftActive = effective.shift || shiftKey;
         const additive =
           Boolean(this.settings?.multiSelectTouch) || shiftActive;
+        const ctrlActive = effective.ctrl;
         this.performTapSelection(
           clientX,
           clientY,
           pointerType,
           additive,
           false,
+          ctrlActive,
         );
       },
       onAltTap: () => {
@@ -1698,8 +1709,10 @@ export class ViewportEngine {
     pointerType: string,
     additive: boolean,
     addOnly = false,
+    ctrl = false,
   ): void {
     if (this.workMode === 'object') {
+      if (ctrl) return;
       const hitId = this.hitTestObject(clientX, clientY, pointerType);
       this.callbacks.onSelectObject(hitId, additive);
       return;
@@ -1707,11 +1720,11 @@ export class ViewportEngine {
 
     const hitCompId = this.hitTestEditComponent(clientX, clientY, pointerType);
     if (this.loopCutPreviewMode) {
-      if (hitCompId) {
+      if (!ctrl && hitCompId) {
         this.callbacks.onPickLoopCutEdge(hitCompId);
       }
     } else {
-      this.callbacks.onSelectComponent(hitCompId, additive, addOnly);
+      this.callbacks.onSelectComponent(hitCompId, additive, addOnly, ctrl);
     }
   }
 
@@ -2424,8 +2437,10 @@ export class ViewportEngine {
     this.modalStartY = startY;
     this.modalLastDeltaWorld.set(0, 0, 0);
     this.modalVertexSlidePlan = null;
+    this.modalParametricVertexSlidePlan = null;
+    this.modalVertexSlideAxisLocked = false;
     this.modalEdgeSlidePlan = null;
-    this.modalEdgeSlideAxis2D = null;
+    this.modalSlideAxis2D = null;
     this.orbitControls.enabled = false;
 
     if (this.workMode === 'object') {
@@ -2438,17 +2453,25 @@ export class ViewportEngine {
       this.modalStartObjPos.copy(g.position);
       this.editDragStartAnchorPos.copy(g.position);
     } else {
-      if (
+      const isSlideSession =
         !this.modalTransformCommitOnRelease &&
         (this.modalTransformMode === 'vertex_slide' ||
-          this.modalTransformMode === 'edge_slide') &&
-        !this.slideSessionBaseMesh
-      ) {
+          this.modalTransformMode === 'edge_slide');
+      if (isSlideSession && !this.slideSessionBaseMesh) {
         this.slideSessionBaseMesh = visual.baseEditableMesh.clone();
+        this.slideSessionFactor = 0;
         this.slideSessionHasChanges = false;
+        this.slideSessionVertexSlidePlan = null;
       }
-      this.editDragStartMesh = visual.baseEditableMesh.clone();
-      this.editDragStartVertexIds = visual.baseEditableMesh.getVertexIdsFromSelection(
+      if (isSlideSession && this.slideSessionBaseMesh) {
+        this.editDragStartMesh = this.slideSessionBaseMesh.clone();
+        this.modalSlideStartFactor = this.slideSessionFactor;
+      } else {
+        this.editDragStartMesh = visual.baseEditableMesh.clone();
+        this.modalSlideStartFactor = 0;
+      }
+      this.lastAppliedSlideFactor = this.modalSlideStartFactor;
+      this.editDragStartVertexIds = this.editDragStartMesh.getVertexIdsFromSelection(
         this.editSelectionMode,
         this.selectedComponentIds,
       );
@@ -2456,7 +2479,7 @@ export class ViewportEngine {
       for (const v of this.editDragStartMesh.vertices) {
         this.editDragStartVertexPositions.set(v.id, [...v.position]);
       }
-      const centroidLocal = visual.baseEditableMesh.computeCentroid(
+      const centroidLocal = this.editDragStartMesh.computeCentroid(
         this.editDragStartVertexIds,
       );
       if (!centroidLocal) {
@@ -2486,6 +2509,20 @@ export class ViewportEngine {
           return;
         }
         this.modalVertexSlidePlan = plan;
+        if (
+          isSlideSession &&
+          this.slideSessionVertexSlidePlan &&
+          Math.abs(this.modalSlideStartFactor) > 1e-5
+        ) {
+          this.modalParametricVertexSlidePlan = this.slideSessionVertexSlidePlan;
+          this.modalVertexSlideAxisLocked = true;
+          this.modalSlideAxis2D = this.computeScreenSlideAxis2D(
+            visual,
+            this.slideSessionVertexSlidePlan.railsByVertex.values(),
+            startX,
+            startY,
+          );
+        }
       } else if (this.modalTransformMode === 'edge_slide') {
         const plan = buildEdgeSlidePlan(
           this.editDragStartMesh,
@@ -2497,53 +2534,12 @@ export class ViewportEngine {
           return;
         }
         this.modalEdgeSlidePlan = plan;
-
-        // Precompute locked screen-space axis for Edge Slide
-        this.activeCamera.updateMatrixWorld(true);
-        let cx = 0;
-        let cy = 0;
-        let cz = 0;
-        let cnt = 0;
-        for (const rail of plan.railsByVertex.values()) {
-          cx += rail.startPos[0];
-          cy += rail.startPos[1];
-          cz += rail.startPos[2];
-          cnt++;
-        }
-        if (cnt > 0) {
-          cx /= cnt;
-          cy /= cnt;
-          cz /= cnt;
-        }
-        const worldC = new THREE.Vector3(cx, cy, cz).applyMatrix4(
-          visual.group.matrixWorld,
+        this.modalSlideAxis2D = this.computeScreenSlideAxis2D(
+          visual,
+          plan.railsByVertex.values(),
+          startX,
+          startY,
         );
-        const worldA = new THREE.Vector3(
-          cx + plan.avgDirA[0] * plan.avgLenA,
-          cy + plan.avgDirA[1] * plan.avgLenA,
-          cz + plan.avgDirA[2] * plan.avgLenA,
-        ).applyMatrix4(visual.group.matrixWorld);
-        const worldB = new THREE.Vector3(
-          cx + plan.avgDirB[0] * plan.avgLenB,
-          cy + plan.avgDirB[1] * plan.avgLenB,
-          cz + plan.avgDirB[2] * plan.avgLenB,
-        ).applyMatrix4(visual.group.matrixWorld);
-
-        const p0 = this.projectWorldPointToCanvasPx(worldC);
-        const pA = this.projectWorldPointToCanvasPx(worldA);
-        const pB = this.projectWorldPointToCanvasPx(worldB);
-        const vAx = pA.x - p0.x;
-        const vAy = pA.y - p0.y;
-        const vBx = pB.x - p0.x;
-        const vBy = pB.y - p0.y;
-        const combX = vAx - vBx;
-        const combY = vAy - vBy;
-        const combLen = Math.hypot(combX, combY);
-        const dirX = combLen > 2 ? combX / combLen : 1;
-        const dirY = combLen > 2 ? combY / combLen : 0;
-        const lenPosPx = Math.max(24, Math.abs(vAx * dirX + vAy * dirY) || 75);
-        const lenNegPx = Math.max(24, Math.abs(vBx * dirX + vBy * dirY) || lenPosPx);
-        this.modalEdgeSlideAxis2D = { dirX, dirY, lenPosPx, lenNegPx };
       }
     }
 
@@ -2599,14 +2595,293 @@ export class ViewportEngine {
         : this.modalTransformMode === 'edge_slide'
           ? 'Deslizar arista'
           : 'Mover (G)';
-    this.callbacks.onModalTransformStatusChange?.({
-      active: true,
-      mode: this.modalTransformMode,
-      label: modeLabel,
-      deltaText: this.modalTransformMode === 'move' ? '0.00, 0.00, 0.00' : '0%',
-      clamped: false,
-    });
-    this.requestRender();
+      const pct = Math.round(this.modalSlideStartFactor * 100);
+      this.callbacks.onModalTransformStatusChange?.({
+        active: true,
+        mode: this.modalTransformMode,
+        label: modeLabel,
+        deltaText:
+          this.modalTransformMode === 'move'
+            ? '0.00, 0.00, 0.00'
+            : `${pct >= 0 ? '+' : ''}${pct}%`,
+        clamped: false,
+      });
+      this.requestRender();
+    }
+
+  private computeScreenSlideAxis2D(
+    visual: ObjectVisual,
+    rails: Iterable<Pick<VertexSlideRailPair, 'vertexId' | 'startPos' | 'railA' | 'railB'>>,
+    startX: number,
+    startY: number,
+  ): { dirX: number; dirY: number; lenPosPx: number; lenNegPx: number } {
+    visual.group.updateMatrixWorld(true);
+    this.activeCamera.updateMatrixWorld(true);
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const startPxX = startX - rect.left;
+    const startPxY = startY - rect.top;
+
+    interface ProjectedRailSample {
+      vAx: number;
+      vAy: number;
+      hasA: boolean;
+      vBx: number;
+      vBy: number;
+      hasB: boolean;
+      weight: number;
+      distToStart: number;
+      spanPx: number;
+    }
+
+    const samples: ProjectedRailSample[] = [];
+    for (const rail of rails) {
+      const liveV = visual.baseEditableMesh.getVertex(rail.vertexId);
+      const p0World = new THREE.Vector3(...rail.startPos).applyMatrix4(
+        visual.group.matrixWorld,
+      );
+      const p0 = this.projectWorldPointToCanvasPx(p0World);
+      const pCursorRef = liveV
+        ? this.projectWorldPointToCanvasPx(
+            new THREE.Vector3(...liveV.position).applyMatrix4(
+              visual.group.matrixWorld,
+            ),
+          )
+        : p0;
+      const distToStart = Math.hypot(
+        pCursorRef.x - startPxX,
+        pCursorRef.y - startPxY,
+      );
+      const weight = 1 / (1 + distToStart / 80);
+
+      let vAx = 0;
+      let vAy = 0;
+      let hasA = false;
+      if (rail.railA) {
+        const pAWorld = new THREE.Vector3(...rail.railA).applyMatrix4(
+          visual.group.matrixWorld,
+        );
+        const pA = this.projectWorldPointToCanvasPx(pAWorld);
+        vAx = pA.x - p0.x;
+        vAy = pA.y - p0.y;
+        hasA = Math.hypot(vAx, vAy) > 1.5;
+      }
+
+      let vBx = 0;
+      let vBy = 0;
+      let hasB = false;
+      if (rail.railB) {
+        const pBWorld = new THREE.Vector3(...rail.railB).applyMatrix4(
+          visual.group.matrixWorld,
+        );
+        const pB = this.projectWorldPointToCanvasPx(pBWorld);
+        vBx = pB.x - p0.x;
+        vBy = pB.y - p0.y;
+        hasB = Math.hypot(vBx, vBy) > 1.5;
+      }
+
+      if (hasA || hasB) {
+        samples.push({
+          vAx,
+          vAy,
+          hasA,
+          vBx,
+          vBy,
+          hasB,
+          weight,
+          distToStart,
+          spanPx: Math.hypot(vAx - vBx, vAy - vBy),
+        });
+      }
+    }
+
+    let sumAx = 0;
+    let sumAy = 0;
+    let wA = 0;
+    let sumBx = 0;
+    let sumBy = 0;
+    let wB = 0;
+    for (const s of samples) {
+      if (s.hasA) {
+        sumAx += s.vAx * s.weight;
+        sumAy += s.vAy * s.weight;
+        wA += s.weight;
+      }
+      if (s.hasB) {
+        sumBx += s.vBx * s.weight;
+        sumBy += s.vBy * s.weight;
+        wB += s.weight;
+      }
+    }
+    const avgAx = wA > 0 ? sumAx / wA : 0;
+    const avgAy = wA > 0 ? sumAy / wA : 0;
+    const avgBx = wB > 0 ? sumBx / wB : 0;
+    const avgBy = wB > 0 ? sumBy / wB : 0;
+    const combX = avgAx - avgBx;
+    const combY = avgAy - avgBy;
+    const combLen = Math.hypot(combX, combY);
+
+    let dirX = 1;
+    let dirY = 0;
+    let lenPosPx = 75;
+    let lenNegPx = 75;
+
+    if (combLen > 8) {
+      dirX = combX / combLen;
+      dirY = combY / combLen;
+      let projPosSum = 0;
+      let projPosW = 0;
+      let projNegSum = 0;
+      let projNegW = 0;
+      for (const s of samples) {
+        if (s.hasA) {
+          const p = Math.abs(s.vAx * dirX + s.vAy * dirY);
+          if (p > 2) {
+            projPosSum += p * s.weight;
+            projPosW += s.weight;
+          }
+        }
+        if (s.hasB) {
+          const p = Math.abs(s.vBx * dirX + s.vBy * dirY);
+          if (p > 2) {
+            projNegSum += p * s.weight;
+            projNegW += s.weight;
+          }
+        }
+      }
+      const avgPos =
+        projPosW > 0 ? projPosSum / projPosW : Math.abs(avgAx * dirX + avgAy * dirY);
+      const avgNeg =
+        projNegW > 0 ? projNegSum / projNegW : Math.abs(avgBx * dirX + avgBy * dirY);
+      lenPosPx = Math.max(24, avgPos || avgNeg || 75);
+      lenNegPx = Math.max(24, avgNeg || lenPosPx);
+    } else if (samples.length > 0) {
+      samples.sort((a, b) => a.distToStart - b.distToStart);
+      const best = samples.find((s) => s.spanPx > 4) ?? samples[0];
+      const localCombX = best.vAx - best.vBx;
+      const localCombY = best.vAy - best.vBy;
+      const localLen = Math.hypot(localCombX, localCombY);
+      if (localLen > 2) {
+        dirX = localCombX / localLen;
+        dirY = localCombY / localLen;
+      }
+      const pPos = best.hasA ? Math.abs(best.vAx * dirX + best.vAy * dirY) : 0;
+      const pNeg = best.hasB ? Math.abs(best.vBx * dirX + best.vBy * dirY) : 0;
+      lenPosPx = Math.max(24, pPos || pNeg || 75);
+      lenNegPx = Math.max(24, pNeg || lenPosPx);
+    }
+
+    return { dirX, dirY, lenPosPx, lenNegPx };
+  }
+
+  private resolveVertexSlidePreferredDirLocal(
+    visual: ObjectVisual,
+    dragDx: number,
+    dragDy: number,
+  ): Vec3 | undefined {
+    if (!this.editDragStartMesh || !this.modalVertexSlidePlan) return undefined;
+    const dragLen = Math.hypot(dragDx, dragDy);
+    if (dragLen < 1) return undefined;
+
+    visual.group.updateMatrixWorld(true);
+    this.activeCamera.updateMatrixWorld(true);
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const startPxX = this.modalStartX - rect.left;
+    const startPxY = this.modalStartY - rect.top;
+
+    const selectedVertSet = new Set(this.modalVertexSlidePlan.vertexIds);
+    const internalEdgeIds = new Set<string>();
+    for (const edge of this.editDragStartMesh.edges) {
+      if (selectedVertSet.has(edge.v0) && selectedVertSet.has(edge.v1)) {
+        internalEdgeIds.add(edge.id);
+      }
+    }
+
+    if (internalEdgeIds.size > 0) {
+      const chainPlan = buildEdgeSlidePlan(this.editDragStartMesh, internalEdgeIds);
+      if (chainPlan.valid && chainPlan.railsByVertex.size > 0) {
+        const chainAxis = this.computeScreenSlideAxis2D(
+          visual,
+          chainPlan.railsByVertex.values(),
+          this.modalStartX,
+          this.modalStartY,
+        );
+        const signedChainDot =
+          (dragDx * chainAxis.dirX + dragDy * chainAxis.dirY) / dragLen;
+        const chainCos = Math.abs(signedChainDot);
+
+        let maxLongCos = 0;
+        for (const eid of internalEdgeIds) {
+          const e = this.editDragStartMesh.getEdge(eid);
+          if (!e) continue;
+          const va = this.editDragStartMesh.getVertex(e.v0);
+          const vb = this.editDragStartMesh.getVertex(e.v1);
+          if (!va || !vb) continue;
+          const p0 = this.projectWorldPointToCanvasPx(
+            new THREE.Vector3(...va.position).applyMatrix4(visual.group.matrixWorld),
+          );
+          const p1 = this.projectWorldPointToCanvasPx(
+            new THREE.Vector3(...vb.position).applyMatrix4(visual.group.matrixWorld),
+          );
+          const vx = p1.x - p0.x;
+          const vy = p1.y - p0.y;
+          const vLen = Math.hypot(vx, vy);
+          if (vLen > 1.5) {
+            maxLongCos = Math.max(
+              maxLongCos,
+              Math.abs((dragDx * vx + dragDy * vy) / (dragLen * vLen)),
+            );
+          }
+        }
+
+        if (chainCos >= 0.32 || chainCos >= maxLongCos * 0.65) {
+          return signedChainDot >= 0 ? chainPlan.avgDirA : chainPlan.avgDirB;
+        }
+      }
+    }
+
+    let bestScore = -1;
+    let bestDir: Vec3 | undefined;
+    for (const vid of this.modalVertexSlidePlan.vertexIds) {
+      const options = this.modalVertexSlidePlan.railsByVertex.get(vid);
+      if (!options || options.length === 0) continue;
+      const p0 = this.projectWorldPointToCanvasPx(
+        new THREE.Vector3(...options[0].startPos).applyMatrix4(visual.group.matrixWorld),
+      );
+      const distToStart = Math.hypot(p0.x - startPxX, p0.y - startPxY);
+      const weight = 1 / (1 + distToStart / 80);
+
+      for (const opt of options) {
+        const p1 = this.projectWorldPointToCanvasPx(
+          new THREE.Vector3(...opt.targetPos).applyMatrix4(visual.group.matrixWorld),
+        );
+        const vx = p1.x - p0.x;
+        const vy = p1.y - p0.y;
+        const vLen = Math.hypot(vx, vy);
+        if (vLen < 1.5) continue;
+        const cos = (dragDx * vx + dragDy * vy) / (dragLen * vLen);
+        const score = cos * weight;
+        if (score > bestScore) {
+          bestScore = score;
+          bestDir = opt.dir3D;
+        }
+      }
+    }
+    return bestDir;
+  }
+
+  private mapSlideDragToNormalizedFactor(
+    dragDx: number,
+    dragDy: number,
+    axis: { dirX: number; dirY: number; lenPosPx: number; lenNegPx: number },
+    startFactor: number,
+  ): number {
+    const proj = dragDx * axis.dirX + dragDy * axis.dirY;
+    const lenPos = Math.max(24, axis.lenPosPx);
+    const lenNeg = Math.max(24, axis.lenNegPx);
+    const startOffsetPx =
+      startFactor >= 0 ? startFactor * lenPos : startFactor * lenNeg;
+    const currOffsetPx = startOffsetPx + proj;
+    return currOffsetPx >= 0 ? currOffsetPx / lenPos : currOffsetPx / lenNeg;
   }
 
   private updateModalTransform(clientX: number, clientY: number): void {
@@ -2693,7 +2968,34 @@ export class ViewportEngine {
       const dragLen = Math.hypot(dragDx, dragDy);
       this.modalMoved = true;
 
-      if (dragLen < 1) {
+      if (!this.modalParametricVertexSlidePlan || (!this.modalVertexSlideAxisLocked && dragLen < 12)) {
+        const prefDir = this.resolveVertexSlidePreferredDirLocal(
+          visual,
+          dragDx,
+          dragDy,
+        );
+        if (prefDir) {
+          const pPlan = buildParametricVertexSlidePlan(
+            this.editDragStartMesh,
+            this.editDragStartVertexIds,
+            prefDir,
+          );
+          if (pPlan.valid) {
+            this.modalParametricVertexSlidePlan = pPlan;
+            this.modalSlideAxis2D = this.computeScreenSlideAxis2D(
+              visual,
+              pPlan.railsByVertex.values(),
+              this.modalStartX,
+              this.modalStartY,
+            );
+          }
+        }
+      }
+      if (this.modalParametricVertexSlidePlan && dragLen >= 12) {
+        this.modalVertexSlideAxisLocked = true;
+      }
+
+      if (!this.modalParametricVertexSlidePlan || !this.modalSlideAxis2D) {
         this.commitEditedMeshToVisual(
           visual,
           this.editDragStartMesh.clone(),
@@ -2704,84 +3006,33 @@ export class ViewportEngine {
           mode: 'vertex_slide',
           label: 'Deslizar vértice',
           deltaText: '0%',
+          clamped: false,
         });
         this.requestRender();
         return;
       }
 
-      visual.group.updateMatrixWorld(true);
-      this.activeCamera.updateMatrixWorld(true);
-      const selections: VertexSlideSelection[] = [];
-
-      for (const vid of this.modalVertexSlidePlan.vertexIds) {
-        const options = this.modalVertexSlidePlan.railsByVertex.get(vid);
-        if (!options || options.length === 0) continue;
-
-        const wStart = new THREE.Vector3(...options[0].startPos).applyMatrix4(
-          visual.group.matrixWorld,
-        );
-        const p0 = this.projectWorldPointToCanvasPx(wStart);
-
-        let bestPosOpt = null as (typeof options)[number] | null;
-        let bestPosCos = 0.05;
-        let bestPosVec = { vx: 0, vy: 0, vLen: 0 };
-
-        let bestAbsOpt = options[0];
-        let bestAbsCos = -1;
-        let bestAbsVec = { vx: 0, vy: 0, vLen: 0 };
-
-        for (const opt of options) {
-          const wTarget = new THREE.Vector3(...opt.targetPos).applyMatrix4(
-            visual.group.matrixWorld,
-          );
-          const p1 = this.projectWorldPointToCanvasPx(wTarget);
-          const vx = p1.x - p0.x;
-          const vy = p1.y - p0.y;
-          const vLen = Math.hypot(vx, vy);
-          if (vLen < 1e-4) continue;
-          const cos = (dragDx * vx + dragDy * vy) / (dragLen * vLen);
-          if (cos > bestPosCos) {
-            bestPosCos = cos;
-            bestPosOpt = opt;
-            bestPosVec = { vx, vy, vLen };
-          }
-          if (Math.abs(cos) > bestAbsCos) {
-            bestAbsCos = Math.abs(cos);
-            bestAbsOpt = opt;
-            bestAbsVec = { vx, vy, vLen };
-          }
-        }
-
-        const chosen = bestPosOpt ?? (!this.modalSlideClamp ? bestAbsOpt : null);
-        const chosenVec = bestPosOpt ? bestPosVec : bestAbsVec;
-        if (!chosen || chosenVec.vLen < 1e-4) continue;
-
-        const denom = Math.max(20, chosenVec.vLen);
-        const factor =
-          (dragDx * chosenVec.vx + dragDy * chosenVec.vy) /
-          (chosenVec.vLen * denom);
-        selections.push({
-          vertexId: vid,
-          edgeId: chosen.edgeId,
-          neighborId: chosen.neighborId,
-          startPos: chosen.startPos,
-          targetPos: chosen.targetPos,
-          factor,
-        });
-      }
-
-      const res = applyVertexSlideFromScreenSelections(
+      const targetFactor = this.mapSlideDragToNormalizedFactor(
+        dragDx,
+        dragDy,
+        this.modalSlideAxis2D,
+        this.modalSlideStartFactor,
+      );
+      const res = applyParametricVertexSlide(
         this.editDragStartMesh,
-        selections,
+        this.modalParametricVertexSlidePlan,
+        targetFactor,
         this.modalSlideClamp,
       );
+      this.lastAppliedSlideFactor = res.appliedFactor;
       this.commitEditedMeshToVisual(visual, res.mesh, res.movedVertexIds);
 
+      const pct = Math.round(res.appliedFactor * 100);
       this.callbacks.onModalTransformStatusChange?.({
         active: true,
         mode: 'vertex_slide',
         label: 'Deslizar vértice',
-        deltaText: `${Math.round(res.appliedFactor * 100)}%`,
+        deltaText: `${pct >= 0 ? '+' : ''}${pct}%`,
         clamped: res.clamped,
       });
       this.requestRender();
@@ -2792,22 +3043,25 @@ export class ViewportEngine {
       this.modalTransformMode === 'edge_slide' &&
       this.editDragStartMesh &&
       this.modalEdgeSlidePlan &&
-      this.modalEdgeSlideAxis2D
+      this.modalSlideAxis2D
     ) {
       const dragDx = clientX - this.modalStartX;
       const dragDy = clientY - this.modalStartY;
-      const axis = this.modalEdgeSlideAxis2D;
-      const proj = dragDx * axis.dirX + dragDy * axis.dirY;
-      const denom = proj >= 0 ? axis.lenPosPx : axis.lenNegPx;
-      const factor = proj / Math.max(20, denom);
+      const targetFactor = this.mapSlideDragToNormalizedFactor(
+        dragDx,
+        dragDy,
+        this.modalSlideAxis2D,
+        this.modalSlideStartFactor,
+      );
 
       this.modalMoved = true;
       const res = applyEdgeSlide(
         this.editDragStartMesh,
         this.modalEdgeSlidePlan,
-        factor,
+        targetFactor,
         this.modalSlideClamp,
       );
+      this.lastAppliedSlideFactor = res.appliedFactor;
       this.commitEditedMeshToVisual(visual, res.mesh, res.movedVertexIds);
 
       const pct = Math.round(res.appliedFactor * 100);
@@ -2825,18 +3079,22 @@ export class ViewportEngine {
   private endModalTransform(): void {
     if (!this.isModalDragging) return;
     const wasMoved = this.modalMoved;
+    const activeMode = this.modalTransformMode;
+    const usedVertexPlan = this.modalParametricVertexSlidePlan;
     this.isModalDragging = false;
     this.modalMoved = false;
     this.modalVertexSlidePlan = null;
+    this.modalParametricVertexSlidePlan = null;
+    this.modalVertexSlideAxisLocked = false;
     this.modalEdgeSlidePlan = null;
-    this.modalEdgeSlideAxis2D = null;
-    this.callbacks.onModalTransformStatusChange?.(null);
+    this.modalSlideAxis2D = null;
 
     const objId = this.selectedObjectId;
     const visual = objId ? this.visuals.get(objId) : undefined;
     let committed = false;
 
     if (this.workMode === 'object' && this.objectDragStartTransform) {
+      this.callbacks.onModalTransformStatusChange?.(null);
       const before = this.objectDragStartTransform;
       this.objectDragStartTransform = null;
       if (wasMoved && objId && visual) {
@@ -2852,26 +3110,27 @@ export class ViewportEngine {
     } else if (this.workMode === 'edit' && this.editDragStartMesh) {
       if (
         !this.modalTransformCommitOnRelease &&
-        (this.modalTransformMode === 'vertex_slide' ||
-          this.modalTransformMode === 'edge_slide')
+        (activeMode === 'vertex_slide' || activeMode === 'edge_slide')
       ) {
         this.editDragStartMesh = null;
         this.editDragStartVertexPositions.clear();
         this.proportionalDragField = null;
         this.proportionalDragWeights.clear();
         this.proportionalPreviewField = null;
-        if (wasMoved) {
-          this.slideSessionHasChanges = true;
+        this.slideSessionFactor = this.lastAppliedSlideFactor;
+        this.slideSessionHasChanges = Math.abs(this.slideSessionFactor) > 1e-5;
+        if (activeMode === 'vertex_slide') {
+          this.slideSessionVertexSlidePlan = this.slideSessionHasChanges
+            ? usedVertexPlan
+            : null;
         }
+        const pct = Math.round(this.slideSessionFactor * 100);
         this.callbacks.onModalTransformStatusChange?.({
           active: false,
-          mode: this.modalTransformMode,
-          label:
-            this.modalTransformMode === 'vertex_slide'
-              ? 'Vertex Slide'
-              : 'Edge Slide',
+          mode: activeMode,
+          label: activeMode === 'vertex_slide' ? 'Vertex Slide' : 'Edge Slide',
           deltaText: this.slideSessionHasChanges
-            ? 'Previsualización lista'
+            ? `${pct >= 0 ? '+' : ''}${pct}%`
             : 'Arrastra sobre la malla',
         });
         this.syncGizmoAttachment();
@@ -2879,6 +3138,7 @@ export class ViewportEngine {
         return;
       }
 
+      this.callbacks.onModalTransformStatusChange?.(null);
       const before = this.editDragStartMesh;
       this.editDragStartMesh = null;
       this.editDragStartVertexPositions.clear();
@@ -2890,6 +3150,8 @@ export class ViewportEngine {
         this.callbacks.onCommitMeshEdit(objId, before, after);
         committed = true;
       }
+    } else {
+      this.callbacks.onModalTransformStatusChange?.(null);
     }
 
     this.callbacks.onCompleteModalTransform?.(committed);
@@ -2913,7 +3175,11 @@ export class ViewportEngine {
       const before = this.slideSessionBaseMesh;
       const after = visual.baseEditableMesh.clone();
       this.slideSessionBaseMesh = null;
+      this.slideSessionFactor = 0;
+      this.modalSlideStartFactor = 0;
+      this.lastAppliedSlideFactor = 0;
       this.slideSessionHasChanges = false;
+      this.slideSessionVertexSlidePlan = null;
       this.callbacks.onModalTransformStatusChange?.(null);
       this.callbacks.onCommitMeshEdit(objId, before, after);
       this.callbacks.onCompleteModalTransform?.(true);
@@ -2922,7 +3188,11 @@ export class ViewportEngine {
       return true;
     }
     this.slideSessionBaseMesh = null;
+    this.slideSessionFactor = 0;
+    this.modalSlideStartFactor = 0;
+    this.lastAppliedSlideFactor = 0;
     this.slideSessionHasChanges = false;
+    this.slideSessionVertexSlidePlan = null;
     this.callbacks.onModalTransformStatusChange?.(null);
     this.callbacks.onCompleteModalTransform?.(true);
     this.syncGizmoAttachment();
@@ -2943,8 +3213,10 @@ export class ViewportEngine {
     this.isModalDragging = false;
     this.modalMoved = false;
     this.modalVertexSlidePlan = null;
+    this.modalParametricVertexSlidePlan = null;
+    this.modalVertexSlideAxisLocked = false;
     this.modalEdgeSlidePlan = null;
-    this.modalEdgeSlideAxis2D = null;
+    this.modalSlideAxis2D = null;
     this.callbacks.onModalTransformStatusChange?.(null);
 
     const visual = this.selectedObjectId
@@ -2966,7 +3238,11 @@ export class ViewportEngine {
     ) {
       const before = (this.slideSessionBaseMesh ?? this.editDragStartMesh)!;
       this.slideSessionBaseMesh = null;
+      this.slideSessionFactor = 0;
+      this.modalSlideStartFactor = 0;
+      this.lastAppliedSlideFactor = 0;
       this.slideSessionHasChanges = false;
+      this.slideSessionVertexSlidePlan = null;
       this.editDragStartMesh = null;
       this.editDragStartVertexPositions.clear();
       this.proportionalDragField = null;
@@ -2977,7 +3253,11 @@ export class ViewportEngine {
       }
     } else {
       this.slideSessionBaseMesh = null;
+      this.slideSessionFactor = 0;
+      this.modalSlideStartFactor = 0;
+      this.lastAppliedSlideFactor = 0;
       this.slideSessionHasChanges = false;
+      this.slideSessionVertexSlidePlan = null;
     }
 
     this.syncGizmoAttachment();
@@ -3050,7 +3330,11 @@ export class ViewportEngine {
     this.modalSlideClamp = params.modalSlideClamp ?? true;
     if (!this.modalTransformMode) {
       this.slideSessionBaseMesh = null;
+      this.slideSessionFactor = 0;
+      this.modalSlideStartFactor = 0;
+      this.lastAppliedSlideFactor = 0;
       this.slideSessionHasChanges = false;
+      this.slideSessionVertexSlidePlan = null;
     }
     this.cameraRotationLocked = Boolean(params.cameraRotationLocked);
 
@@ -4141,11 +4425,17 @@ export class ViewportEngine {
         mesh;
       let guideSegments: [Vec3, Vec3][] = [];
       if (this.modalTransformMode === 'vertex_slide') {
-        const vIds = refMesh.getVertexIdsFromSelection(
-          this.editSelectionMode,
-          this.selectedComponentIds,
-        );
-        guideSegments = buildVertexSlidePlan(refMesh, vIds).guideSegments;
+        const activePlan =
+          this.modalParametricVertexSlidePlan ?? this.slideSessionVertexSlidePlan;
+        if (activePlan && activePlan.valid) {
+          guideSegments = activePlan.guideSegments;
+        } else {
+          const vIds = refMesh.getVertexIdsFromSelection(
+            this.editSelectionMode,
+            this.selectedComponentIds,
+          );
+          guideSegments = buildVertexSlidePlan(refMesh, vIds).guideSegments;
+        }
       } else {
         guideSegments = buildEdgeSlidePlan(
           refMesh,

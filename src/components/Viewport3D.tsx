@@ -83,6 +83,7 @@ interface Viewport3DProps {
   operatorMergedCount?: number;
   operatorError?: string | null;
   operatorStatusMessage?: string | null;
+  operatorEffectiveMode?: EditSelectionMode | null;
   loopCutPreviewSegments: [Vec3, Vec3][];
   loopCutRingEdgeIds?: string[];
   loopCutFaceIds?: string[];
@@ -96,6 +97,7 @@ interface Viewport3DProps {
     id: string | null,
     additive: boolean,
     addOnly?: boolean,
+    ctrl?: boolean,
   ) => void;
   onBoxSelectComponents?: (ids: string[], additive: boolean) => void;
   onPickLoopCutEdge: (edgeId: string | null) => void;
@@ -197,6 +199,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
       operatorMergedCount = 0,
       operatorError = null,
       operatorStatusMessage = null,
+      operatorEffectiveMode = null,
       loopCutPreviewSegments,
       loopCutRingEdgeIds = [],
       loopCutFaceIds = [],
@@ -544,8 +547,8 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
         callbacksRef.current.onSelectObject(id, additive),
       onBoxSelectObjects: (ids, additive) =>
         callbacksRef.current.onBoxSelectObjects?.(ids, additive),
-      onSelectComponent: (id, additive, addOnly) =>
-        callbacksRef.current.onSelectComponent(id, additive, addOnly),
+      onSelectComponent: (id, additive, addOnly, ctrl) =>
+        callbacksRef.current.onSelectComponent(id, additive, addOnly, ctrl),
       onBoxSelectComponents: (ids, additive) =>
         callbacksRef.current.onBoxSelectComponents?.(ids, additive),
       onBoxSelectOverlayChange: (overlay) => setBoxOverlay(overlay),
@@ -715,6 +718,12 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
       {/* Dedicated WebGL Mount Container */}
       <div
         ref={viewportContainerRef}
+        onPointerDownCapture={(e) => {
+          if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) {
+            physComboConsumedRef.current = true;
+            physComboCandidateRef.current = null;
+          }
+        }}
         style={{
           touchAction: 'none',
           WebkitUserSelect: 'none',
@@ -914,6 +923,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
         {operatorSession && (
           <EditOperatorBar
             session={operatorSession}
+            effectiveSelectionMode={operatorEffectiveMode}
             mergedCount={operatorMergedCount}
             operatorError={operatorError}
             operatorStatusMessage={operatorStatusMessage}
@@ -994,7 +1004,7 @@ export const Viewport3D = React.forwardRef<Viewport3DHandle, Viewport3DProps>(
                     : 'Mover (G)'}
               </span>
               <span className="text-[11px] font-mono-tabular text-[#9ca3af] whitespace-nowrap">
-                {modalStatus?.active
+                {modalStatus
                   ? modalStatus.deltaText
                   : modalTransform.mode === 'move'
                     ? 'Arrastra para mover'

@@ -36,7 +36,7 @@ import { EditSelectionMode } from '../core/mesh/operations';
 import { PrimitiveType } from '../core/mesh/primitives';
 import { TransformTool, WorkMode } from '../core/project/types';
 import { EditOperatorType } from '../state/useModelerStore';
-import { ProportionalIcon } from './ProportionalEditingBar';
+import { ProportionalIcon } from './ProportionalIcons';
 
 export interface ContextMenuState {
   clientX: number;

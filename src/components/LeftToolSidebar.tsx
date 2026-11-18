@@ -62,7 +62,7 @@ import {
 import { EditOperatorType } from '../state/useModelerStore';
 import { DeleteMenuPopover } from './DeleteMenuPopover';
 import { PrimitiveMenu } from './PrimitiveMenu';
-import { FalloffCurveIcon, ProportionalIcon } from './ProportionalEditingBar';
+import { FalloffCurveIcon, ProportionalIcon } from './ProportionalIcons';
 
 type SidebarSectionId =
   | 'selection'

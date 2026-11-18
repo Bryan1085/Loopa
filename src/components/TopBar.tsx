@@ -38,7 +38,7 @@ import {
   WorkMode,
 } from '../core/project/types';
 import { LoopaSymbol } from './BrandLogo';
-import { ProportionalIcon } from './ProportionalEditingBar';
+import { ProportionalIcon } from './ProportionalIcons';
 import {
   DISPLAY_MODES,
   getXrayDescriptor,
